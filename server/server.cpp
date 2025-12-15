@@ -1,17 +1,17 @@
 #include <algorithm>
 #include <arpa/inet.h>
-#include <array>
 #include <cstdio>
+#include <iostream>
 #include <mutex>
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
-#include <unordered_map>
+#include <thread>
+#include <unistd.h>
 #include <vector>
-using std::array;
+using std::mutex;
 using std::string;
 using std::vector;
-using std::mutex;
 
 #define NUMBER_OF_ROOMS 4
 
@@ -24,8 +24,8 @@ public:
 };
 
 class Game {
-public: 
-  vector<Player*> players;
+public:
+  vector<Player *> players;
 
   int tick();
 };
@@ -39,30 +39,44 @@ public:
 
 class Session {
   int socket;
-  Player* player;
+  Player *player;
 };
 
-
 class Server {
-  array<Room *, NUMBER_OF_ROOMS> rooms;
+  vector<Room> rooms;
   mutex rooms_mutex;
   vector<Player> players;
   mutex players_mutex;
   vector<Session> sessions;
   int port;
   string ip_address;
-public:
-  Server(int port, const string& ip_address)
-    : port(port), ip_address(ip_address) {
-    // Initialize rooms to nullptr or new Room objects as needed
-    for (auto& room : rooms) {
-      room = nullptr;
+
+  static void handle_client(int client_socket, sockaddr_in client_addr) {
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
+    std::cout << "Client connected from " << client_ip << ":"
+              << ntohs(client_addr.sin_port) << std::endl;
+
+    char buffer[1024];
+    while (true) {
+      ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received <= 0)
+        break;
+      buffer[bytes_received] = '\0';
+      printf("Received: %s\n", buffer);
+      // send(client_socket, buffer, bytes_received, 0);
     }
-    // players, sessions, and maps are default-initialized
+    close(client_socket);
   }
 
+public:
+  Server(int port, const string &ip_address)
+      : port(port), ip_address(ip_address) {
+    // players, sessions, rooms and maps are default-initialized
+  }
 
   int serve() {
+    int res;
     printf("Hello World!\n");
 
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -72,39 +86,35 @@ public:
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = inet_addr(ip_address.c_str());
 
-    int bind_err = bind(server_socket, (struct sockaddr *)&server_addr,
-                        sizeof(server_addr));
-    if (bind_err) {
+    res = bind(server_socket, (struct sockaddr *)&server_addr,
+               sizeof(server_addr));
+    if (res) {
       perror("bind error:");
-      return 0;
+      throw res;
     }
 
-    int listen_err = listen(server_socket, 10);
-    if (bind_err) {
+    res = listen(server_socket, 10);
+    if (res) {
       perror("listen error:");
-      return 0;
+      throw res;
     }
 
-    sockaddr client_addr;
-    socklen_t addrlen;
-    int client_socket = accept(server_socket, &client_addr, &addrlen);
-
-    char buffer[1024];
     while (true) {
-      ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-      if (bytes_received <= 0)
-        break; // client closed or error
-      buffer[bytes_received] = '\0';
-      printf("Received: %s\n", buffer);
-      // Optionally, send a response:
-      // send(client_socket, buffer, bytes_received, 0);
+      sockaddr_in client_addr = {};
+      socklen_t addrlen = sizeof(client_addr);
+      int client_socket = accept(server_socket, (sockaddr *)&client_addr, &addrlen);
+      if (client_socket < 0) {
+        perror("accept error:");
+        continue;
+      }
+      std::thread(Server::handle_client, client_socket, client_addr).detach();
     }
-
     return 0;
-  };
+  }
 };
 
 int main(int argc, char **argv) {
   Server *server = new Server(8888, "127.0.0.1");
   server->serve();
+  delete server;
 }
