@@ -73,7 +73,7 @@ public:
   struct epoll_event event, events[10];
   std::vector<Room> rooms;
   std::mutex rooms_mutex;
-  std::list<Player> players;
+  std::vector<std::unique_ptr<Player>> players;
   std::mutex players_mutex;
   std::unordered_map<int, std::unique_ptr<Connection>> connections;
   std::unordered_map<int, int> timer_to_conn;

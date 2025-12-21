@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fcntl.h>
 #include <iostream>
@@ -17,7 +18,7 @@
 
 #define MAX_EVENTS 10
 #define TIMEOUT 15
-#define ALIVE_CHECK_INTERVAL 1
+#define ALIVE_CHECK_INTERVAL 2
 
 // Game implementation
 int Game::tick() { return 0; }
@@ -85,19 +86,23 @@ int Server::serve() {
 }
 void Server::handle_timer(int sock_fd) {
   // Read to clear the event
+  Connection &conn = *connections[sock_fd];
+
   uint64_t expirations;
-  ssize_t s = read(sock_fd, &expirations, sizeof(expirations));
+  ssize_t s = read(conn.timer_fd, &expirations, sizeof(expirations));
   if (s != sizeof(expirations)) {
     perror("timerfd read");
     return;
   }
-  Connection &conn = *connections[sock_fd];
 
   if (std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - conn.last_active)
           .count() > TIMEOUT) {
     close_connection(sock_fd);
   }
+
+  const char *ping_msg = "PING|";
+  send(conn.socket, ping_msg, strlen(ping_msg), 0);
 }
 
 void Server::handle_socket_read(int sock_fd) {
@@ -153,17 +158,17 @@ std::vector<std::string> split(const char *str, char c = ' ') {
 }
 
 int Server::process_message(Connection &conn, std::string msg) {
-  std::cout << "rocessing message:" << msg << std::endl;
+  // std::cout << "rocessing message:" << msg << std::endl;
   auto tokens = split(msg.data(), ' ');
-  for (const auto &token : tokens) {
-    std::cout << "token: " << token << std::endl;
-  }
+  // for (const auto &token : tokens) {
+  //   std::cout << "token: " << token << std::endl;
+  // }
   if (tokens.size() < 2 || tokens[0] != "SNK") {
     close_connection(conn.socket);
     return 1;
   }
   msg_type type = get_msg_type(tokens[1]);
-  if (type != NICK && !conn.player) {
+  if (type != NICK && type != PONG && !conn.player) {
     close_connection(conn.socket);
     return 1;
   }
@@ -173,8 +178,8 @@ int Server::process_message(Connection &conn, std::string msg) {
       close_connection(conn.socket);
       return 1;
     }
-    players.emplace_back(tokens[2]);
-    conn.player = &players.back();
+    players.push_back(std::make_unique<Player>(tokens[2]));
+    conn.player = players.back().get();
     break;
   case INVALID:
     break;
