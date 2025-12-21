@@ -3,26 +3,30 @@
 #include <arpa/inet.h>
 #include <cstddef>
 #include <cstdio>
+#include <ctime>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <ostream>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 
 #define MAX_EVENTS 10
 #define TIMEOUT 5
+#define ALIVE_CHECK_INTERVAL 1
 
 // Game implementation
 int Game::tick() { return 0; }
 
 #include <chrono>
 
-Connection::Connection(int socket, sockaddr_in addr)
+Connection::Connection(int socket, int timer_fd, sockaddr_in addr)
     : socket(socket), addr(addr), player(nullptr),
-      last_active(std::chrono::steady_clock::now()) {}
+      last_active(std::chrono::steady_clock::now()), timer_fd(timer_fd) {}
 
 std::string Connection::get_name() {
   if (player) {
@@ -45,14 +49,14 @@ int Server::serve() {
       throw std::runtime_error("Failed to add server socket to pool");
 
     while (true) {
-      int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, TIMEOUT * 1000);
+      int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
       if (!event_count) {
         // timeout
         std::set<int> to_terminate;
-        for (auto conn : connections) {
+        for (auto &conn : connections) {
           if (conn.first != server_socket &&
               std::chrono::duration_cast<std::chrono::seconds>(
-                  std::chrono::steady_clock::now() - conn.second.last_active)
+                  std::chrono::steady_clock::now() - conn.second->last_active)
                       .count() > TIMEOUT) {
             to_terminate.insert(conn.first);
           }
@@ -63,10 +67,13 @@ int Server::serve() {
         std::cout << players.size() << std::endl;
       }
       for (int i = 0; i < event_count; i++) {
-        if (events[i].data.fd == server_socket) {
+        int fd = events[i].data.fd;
+        if (fd == server_socket) {
           handle_new_connection();
-        } else {
-          handle_socket_read(events[i].data.fd);
+        } else if (connections.count(fd)) {
+          handle_socket_read(fd);
+        } else if (timer_to_conn.count(fd)) {
+          handle_timer(timer_to_conn[fd]);
         }
       }
     }
@@ -75,6 +82,23 @@ int Server::serve() {
     return 1;
   }
   return 0;
+}
+void Server::handle_timer(int sock_fd) {
+  std::cout << "checking time" << std::endl;
+  Connection &conn = *connections[sock_fd];
+
+  // Read to clear the event
+  uint64_t expirations;
+  ssize_t s = read(conn.timer_fd, &expirations, sizeof(expirations));
+  if (s != sizeof(expirations)) {
+    perror("timerfd read");
+    return;
+  }
+  if (std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - conn.last_active)
+          .count() > TIMEOUT) {
+    close_connection(sock_fd);
+  }
 }
 
 void Server::handle_socket_read(int sock_fd) {
@@ -86,10 +110,11 @@ void Server::handle_socket_read(int sock_fd) {
     return;
   }
 
-  Connection &conn = it->second;
+  Connection &conn = *(it->second);
   std::string buff(1024, '\0');
   ssize_t bytes_received = recv(sock_fd, &buff[0], buff.size(), 0);
 
+  std::cout << "got here 1" << std::endl;
   if (bytes_received <= 0) {
     close_connection(sock_fd);
     return;
@@ -100,15 +125,19 @@ void Server::handle_socket_read(int sock_fd) {
   buff.resize(bytes_received);
   conn.buff.append(buff);
 
+  std::cout << "got here 2" << std::endl;
   std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
 
   size_t separator = conn.buff.find('|');
   while (separator != std::string::npos) {
+    std::cout << "got here 3" << std::endl;
+
     std::string msg = conn.buff.substr(0, separator);
     conn.buff.erase(0, separator + 1);
     if (process_message(conn, msg)) {
       return;
     };
+    std::cout << "got here 4" << std::endl;
     separator = conn.buff.find('|');
   }
 }
@@ -129,8 +158,11 @@ std::vector<std::string> split(const char *str, char c = ' ') {
 }
 
 int Server::process_message(Connection &conn, std::string msg) {
-  std::cout << "processing message:" << msg << std::endl;
+  std::cout << "rocessing message:" << msg << std::endl;
   auto tokens = split(msg.data(), ' ');
+  for (const auto &token : tokens) {
+    std::cout << "token: " << token << std::endl;
+  }
   if (tokens.size() < 2 || tokens[0] != "SNK") {
     close_connection(conn.socket);
     return 1;
@@ -180,9 +212,14 @@ int Server::add_socket_to_pool(int sock) {
 }
 
 void Server::close_connection(int sock_fd) {
-  std::cout << "Closing connection with: "
-            << connections.find(sock_fd)->second.get_name() << std::endl;
+  auto it = connections.find(sock_fd);
+  if (!it->first)
+    return;
+  std::cout << "Closing connection with: " << it->second->get_name()
+            << std::endl;
   epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_fd, nullptr);
+  close(it->second->timer_fd);
+  timer_to_conn.erase(it->second->timer_fd);
   close(sock_fd);
   connections.erase(sock_fd);
 }
@@ -190,21 +227,34 @@ void Server::close_connection(int sock_fd) {
 void Server::handle_new_connection() {
   sockaddr_in client_addr = {};
   socklen_t addrlen = sizeof(client_addr);
-  int client_socket = accept(server_socket, (sockaddr *)&client_addr, &addrlen);
+  
+  // set up timer for client
+  int timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+  if (timer_fd == -1) {
+    perror("timer_fd");
+    return;
+  }
+  itimerspec timer_spec;
+  timer_spec.it_interval.tv_sec = ALIVE_CHECK_INTERVAL;
+  timer_spec.it_interval.tv_nsec = 0;
+  timer_spec.it_value.tv_sec = ALIVE_CHECK_INTERVAL;
+  timer_spec.it_value.tv_nsec = 0;
+  timerfd_settime(timer_fd, 0, &timer_spec, nullptr);
 
+  // set up new connection 
+  int client_socket = accept(server_socket, (sockaddr *)&client_addr, &addrlen);
   if (client_socket == -1) {
     perror("accept");
     return;
   }
-
   if (set_nonblocking(client_socket) != 0) {
     std::cerr << "Failed to set non-blocking for client" << std::endl;
     close(client_socket);
     return;
   }
-
-  auto res = connections.emplace(client_socket,
-                                 Connection(client_socket, client_addr));
+  auto res = connections.emplace(
+      client_socket, std::make_unique<Connection>(
+                         Connection(client_socket, timer_fd, client_addr)));
   if (!res.second) {
     std::cerr << "Error: Connection already exists for fd " << client_socket
               << std::endl;
@@ -212,14 +262,18 @@ void Server::handle_new_connection() {
     return;
   }
 
-  if (add_socket_to_pool(client_socket) != 0) {
-    std::cerr << "Failed to add client to pool" << std::endl;
-    close(client_socket);
-    connections.erase(client_socket);
-    return;
+  timer_to_conn.insert({timer_fd, client_socket});
+
+  // add fds to pool
+  if (add_socket_to_pool(client_socket) || add_socket_to_pool(timer_fd)) {
+    throw std::runtime_error("could not add to pool");
+    // std::cerr << "Failed to add client to pool" << std::endl;
+    // close(client_socket);
+    // connections.erase(client_socket);
+    // return;
   }
 
-  std::cout << "Client connected: " << res.first->second.get_name()
+  std::cout << "Client connected: " << res.first->second->get_name()
             << std::endl;
 }
 
