@@ -1,7 +1,7 @@
 CXX = g++
 CXXFLAGS = -Wall -std=c++17
 TARGET = server
-SRCS = server.cpp
+SRCS = server.cpp protocol.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(TARGET)

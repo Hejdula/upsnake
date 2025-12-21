@@ -1,17 +1,37 @@
 #include "server.hpp"
+#include "protocol.hpp"
 #include <arpa/inet.h>
+#include <cstddef>
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
+#include <ostream>
+#include <set>
 #include <stdexcept>
+#include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #define MAX_EVENTS 10
+#define TIMEOUT 5
 
 // Game implementation
-int Game::tick() {
-    return 0;
+int Game::tick() { return 0; }
+
+#include <chrono>
+
+Connection::Connection(int socket, sockaddr_in addr)
+    : socket(socket), addr(addr), player(nullptr),
+      last_active(std::chrono::steady_clock::now()) {}
+
+std::string Connection::get_name() {
+  if (player) {
+    return player->nickname;
+  }
+  char client_ip[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &(addr.sin_addr), client_ip, INET_ADDRSTRLEN);
+  int client_port = ntohs(addr.sin_port);
+  return std::string(client_ip) + ":" + std::to_string(client_port);
 }
 
 Server::Server(int port, const std::string &ip_address)
@@ -21,24 +41,32 @@ int Server::serve() {
   try {
     setup();
 
-    add_socket_to_pool(server_socket);
+    if (add_socket_to_pool(server_socket))
+      throw std::runtime_error("Failed to add server socket to pool");
 
     while (true) {
-      int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+      int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, TIMEOUT * 1000);
+      if (!event_count) {
+        // timeout
+        std::set<int> to_terminate;
+        for (auto conn : connections) {
+          if (conn.first != server_socket &&
+              std::chrono::duration_cast<std::chrono::seconds>(
+                  std::chrono::steady_clock::now() - conn.second.last_active)
+                      .count() > TIMEOUT) {
+            to_terminate.insert(conn.first);
+          }
+        }
+        for (auto conn : to_terminate) {
+          close_connection(conn);
+        }
+        std::cout << players.size() << std::endl;
+      }
       for (int i = 0; i < event_count; i++) {
         if (events[i].data.fd == server_socket) {
           handle_new_connection();
         } else {
           handle_socket_read(events[i].data.fd);
-          // char buffer[1024];
-          // ssize_t bytes_received =
-          //     recv(events[i].data.fd, buffer, sizeof(buffer) - 1, 0);
-          // if (bytes_received <= 0) {
-          //   close(events[i].data.fd);
-          // } else {
-          //   buffer[bytes_received] = '\0';
-          //   printf("Received: %s\n", buffer);
-          // }
         }
       }
     }
@@ -52,8 +80,7 @@ int Server::serve() {
 void Server::handle_socket_read(int sock_fd) {
   auto it = connections.find(sock_fd);
   if (it == connections.end()) {
-    printf(
-        "socket file descriptor not in connections, this should not happen");
+    printf("socket file descriptor not in connections, this should not happen");
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_fd, nullptr);
     close(sock_fd);
     return;
@@ -64,62 +91,136 @@ void Server::handle_socket_read(int sock_fd) {
   ssize_t bytes_received = recv(sock_fd, &buff[0], buff.size(), 0);
 
   if (bytes_received <= 0) {
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_fd, nullptr);
-    close(sock_fd);
-    connections.erase(sock_fd);
+    close_connection(sock_fd);
     return;
   }
 
-  // Resize buffer to actual received size before appending
+  conn.last_active = std::chrono::steady_clock::now();
+
   buff.resize(bytes_received);
-
-  std::cout << "recieved " << bytes_received << " bytes from " << conn.socket
-            << std::endl;
-
   conn.buff.append(buff);
 
-  std::cout << "Current buffer: " << conn.buff << std::endl;
+  std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
 
   size_t separator = conn.buff.find('|');
   while (separator != std::string::npos) {
     std::string msg = conn.buff.substr(0, separator);
     conn.buff.erase(0, separator + 1);
-    std::cout << "found a whole message:" << msg << std::endl;
+    if (process_message(conn, msg)) {
+      return;
+    };
     separator = conn.buff.find('|');
   }
 }
 
-void Server::add_socket_to_pool(int sock) {
-  set_nonblocking(sock);
+std::vector<std::string> split(const char *str, char c = ' ') {
+  std::vector<std::string> result;
+
+  do {
+    const char *begin = str;
+
+    while (*str != c && *str)
+      str++;
+
+    result.push_back(std::string(begin, str));
+  } while (0 != *str++);
+
+  return result;
+}
+
+int Server::process_message(Connection &conn, std::string msg) {
+  std::cout << "processing message:" << msg << std::endl;
+  auto tokens = split(msg.data(), ' ');
+  if (tokens.size() < 2 || tokens[0] != "SNK") {
+    close_connection(conn.socket);
+    return 1;
+  }
+  msg_type type = get_msg_type(tokens[1]);
+  if (type != NICK && !conn.player) {
+    close_connection(conn.socket);
+    return 1;
+  }
+  switch (type) {
+  case NICK:
+    if (tokens.size() != 3) {
+      close_connection(conn.socket);
+      return 1;
+    }
+    players.emplace_back(tokens[2]);
+    conn.player = &players.back();
+    break;
+  case INVALID:
+    break;
+  case LEAVE:
+    break;
+  case PONG:
+    break;
+  case MOVE:
+    break;
+  case START:
+    break;
+  case QUIT:
+    break;
+  }
+
+  return 0;
+}
+
+int Server::add_socket_to_pool(int sock) {
+  if (set_nonblocking(sock) != 0) {
+    return -1;
+  }
   event.events = EPOLLIN;
   event.data.fd = sock;
   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &event)) {
-    throw std::runtime_error("addding socket to pool");
+    perror("epoll_ctl");
+    return -1;
   }
+  return 0;
+}
+
+void Server::close_connection(int sock_fd) {
+  std::cout << "Closing connection with: "
+            << connections.find(sock_fd)->second.get_name() << std::endl;
+  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_fd, nullptr);
+  close(sock_fd);
+  connections.erase(sock_fd);
 }
 
 void Server::handle_new_connection() {
   sockaddr_in client_addr = {};
   socklen_t addrlen = sizeof(client_addr);
-  int client_socket =
-      accept(server_socket, (sockaddr *)&client_addr, &addrlen);
+  int client_socket = accept(server_socket, (sockaddr *)&client_addr, &addrlen);
+
   if (client_socket == -1) {
     perror("accept");
+    return;
+  }
+
+  if (set_nonblocking(client_socket) != 0) {
+    std::cerr << "Failed to set non-blocking for client" << std::endl;
+    close(client_socket);
     return;
   }
 
   auto res = connections.emplace(client_socket,
                                  Connection(client_socket, client_addr));
   if (!res.second) {
-    throw std::runtime_error("file descriptor already in connections");
+    std::cerr << "Error: Connection already exists for fd " << client_socket
+              << std::endl;
+    close(client_socket);
+    return;
   }
 
-  add_socket_to_pool(client_socket);
+  if (add_socket_to_pool(client_socket) != 0) {
+    std::cerr << "Failed to add client to pool" << std::endl;
+    close(client_socket);
+    connections.erase(client_socket);
+    return;
+  }
 
-  char client_ip[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
-  std::cout << "Client connected from " << client_ip << ":"
-            << ntohs(client_addr.sin_port) << std::endl;
+  std::cout << "Client connected: " << res.first->second.get_name()
+            << std::endl;
 }
 
 void Server::setup() {
@@ -128,17 +229,16 @@ void Server::setup() {
     throw std::runtime_error("socket");
 
   int opt = 1;
-  if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
-                 &opt, sizeof(opt))) {
-      perror("setsockopt");
+  if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt,
+                 sizeof(opt))) {
+    perror("setsockopt");
   }
 
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(port);
   server_addr.sin_addr.s_addr = inet_addr(ip_address.c_str());
 
-  if (bind(server_socket, (struct sockaddr *)&server_addr,
-           sizeof(server_addr)))
+  if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)))
     throw std::runtime_error("bind");
 
   if (listen(server_socket, 10))
@@ -151,12 +251,17 @@ void Server::setup() {
     throw std::runtime_error("epoll_create1");
 }
 
-void Server::set_nonblocking(int sockfd) {
+int Server::set_nonblocking(int sockfd) {
   int flags = fcntl(sockfd, F_GETFL, 0);
-  if (flags == -1)
-    throw std::runtime_error("fcntl(F_GETFL) failed in set_nonblocking");
-  if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1)
-    throw std::runtime_error("fcntl(F_SETFL) failed in set_nonblocking");
+  if (flags == -1) {
+    perror("fcntl(F_GETFL)");
+    return -1;
+  }
+  if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    perror("fcntl(F_SETFL)");
+    return -1;
+  }
+  return 0;
 }
 
 int main(int argc, char **argv) {

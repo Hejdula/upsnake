@@ -1,12 +1,19 @@
 #ifndef SERVER_HPP
 #define SERVER_HPP
 
+#include <bits/types/error_t.h>
+#include <chrono>
 #include <mutex>
 #include <netinet/in.h>
+#include <set>
 #include <string>
 #include <sys/epoll.h>
 #include <unordered_map>
 #include <vector>
+
+enum err_t {
+  INVALID_MESSAGE,
+};
 
 class Player {
 public:
@@ -30,13 +37,15 @@ public:
 
 class Connection {
 public:
+  Connection(int socket, sockaddr_in addr);
+  std::string get_name();
+
   int socket;
   sockaddr_in addr;
   std::string buff;
   Player *player;
-
-  Connection(int socket, sockaddr_in addr)
-      : socket(socket), addr(addr), buff(), player(nullptr) {}
+  std::chrono::steady_clock::time_point last_active;
+  int timer_fd;
 };
 
 class Server;
@@ -44,11 +53,13 @@ class Server {
 public:
   Server(int port, const std::string &ip_address);
   int serve();
-  void add_socket_to_pool(int sock);
+  int add_socket_to_pool(int sock);
+  int process_message(Connection& conn, std::string msg);
   void handle_new_connection();
   void handle_socket_read(int sock_fd);
   void setup();
-  static void set_nonblocking(int sockfd);
+  void close_connection(int sock_fd);
+  static int set_nonblocking(int sockfd);
 
   // Members
   int port;
