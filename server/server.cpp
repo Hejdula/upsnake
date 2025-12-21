@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 #define MAX_EVENTS 10
-#define TIMEOUT 5
+#define TIMEOUT 15
 #define ALIVE_CHECK_INTERVAL 1
 
 // Game implementation
@@ -84,16 +84,15 @@ int Server::serve() {
   return 0;
 }
 void Server::handle_timer(int sock_fd) {
-  std::cout << "checking time" << std::endl;
-  Connection &conn = *connections[sock_fd];
-
   // Read to clear the event
   uint64_t expirations;
-  ssize_t s = read(conn.timer_fd, &expirations, sizeof(expirations));
+  ssize_t s = read(sock_fd, &expirations, sizeof(expirations));
   if (s != sizeof(expirations)) {
     perror("timerfd read");
     return;
   }
+  Connection &conn = *connections[sock_fd];
+
   if (std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - conn.last_active)
           .count() > TIMEOUT) {
@@ -114,7 +113,6 @@ void Server::handle_socket_read(int sock_fd) {
   std::string buff(1024, '\0');
   ssize_t bytes_received = recv(sock_fd, &buff[0], buff.size(), 0);
 
-  std::cout << "got here 1" << std::endl;
   if (bytes_received <= 0) {
     close_connection(sock_fd);
     return;
@@ -125,19 +123,16 @@ void Server::handle_socket_read(int sock_fd) {
   buff.resize(bytes_received);
   conn.buff.append(buff);
 
-  std::cout << "got here 2" << std::endl;
   std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
 
   size_t separator = conn.buff.find('|');
   while (separator != std::string::npos) {
-    std::cout << "got here 3" << std::endl;
 
     std::string msg = conn.buff.substr(0, separator);
     conn.buff.erase(0, separator + 1);
     if (process_message(conn, msg)) {
       return;
     };
-    std::cout << "got here 4" << std::endl;
     separator = conn.buff.find('|');
   }
 }
@@ -227,7 +222,7 @@ void Server::close_connection(int sock_fd) {
 void Server::handle_new_connection() {
   sockaddr_in client_addr = {};
   socklen_t addrlen = sizeof(client_addr);
-  
+
   // set up timer for client
   int timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
   if (timer_fd == -1) {
@@ -241,7 +236,7 @@ void Server::handle_new_connection() {
   timer_spec.it_value.tv_nsec = 0;
   timerfd_settime(timer_fd, 0, &timer_spec, nullptr);
 
-  // set up new connection 
+  // set up new connection
   int client_socket = accept(server_socket, (sockaddr *)&client_addr, &addrlen);
   if (client_socket == -1) {
     perror("accept");
@@ -266,7 +261,7 @@ void Server::handle_new_connection() {
 
   // add fds to pool
   if (add_socket_to_pool(client_socket) || add_socket_to_pool(timer_fd)) {
-    throw std::runtime_error("could not add to pool");
+    throw std::runtime_error("Could not add to epoll pool");
     // std::cerr << "Failed to add client to pool" << std::endl;
     // close(client_socket);
     // connections.erase(client_socket);

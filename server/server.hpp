@@ -11,6 +11,7 @@
 #include <sys/epoll.h>
 #include <unordered_map>
 #include <vector>
+#include <list>
 
 enum err_t {
   INVALID_MESSAGE,
@@ -72,7 +73,7 @@ public:
   struct epoll_event event, events[10];
   std::vector<Room> rooms;
   std::mutex rooms_mutex;
-  std::vector<Player> players;
+  std::list<Player> players;
   std::mutex players_mutex;
   std::unordered_map<int, std::unique_ptr<Connection>> connections;
   std::unordered_map<int, int> timer_to_conn;
