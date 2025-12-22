@@ -3,7 +3,9 @@
 
 #include <bits/types/error_t.h>
 #include <chrono>
+#include <list>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <netinet/in.h>
 #include <set>
@@ -11,30 +13,32 @@
 #include <sys/epoll.h>
 #include <unordered_map>
 #include <vector>
-#include <list>
 
 enum err_t {
   INVALID_MESSAGE,
 };
 
+enum direction {
+  UP,
+  DOWN,
+  LEFT,
+  RIGHT,
+};
+
 class Player {
 public:
   std::string nickname;
+  direction dir;
   Player(const std::string &nickname) : nickname(nickname) {}
 };
 
 class Game {
 public:
-  std::vector<Player *> players;
+  std::list<Player *> players;
+  bool active;
+  Game() : active(false) {}
 
   int tick();
-};
-
-class Room {
-public:
-  std::vector<Player *> players;
-  Game game;
-  bool active;
 };
 
 class Connection {
@@ -56,7 +60,7 @@ public:
   Server(int port, const std::string &ip_address);
   int serve();
   int add_socket_to_pool(int sock);
-  int process_message(Connection& conn, std::string msg);
+  int process_message(Connection &conn, std::string msg);
   void handle_timer(int fd);
   void handle_socket_read(int sock_fd);
   void handle_new_connection();
@@ -71,7 +75,7 @@ public:
   sockaddr_in server_addr;
   int epoll_fd;
   struct epoll_event event, events[10];
-  std::vector<Room> rooms;
+  std::vector<Game> rooms;
   std::mutex rooms_mutex;
   std::vector<std::unique_ptr<Player>> players;
   std::mutex players_mutex;

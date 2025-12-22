@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <ostream>
+#include <algorithm>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -16,9 +17,11 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 
+#define NUMBER_OF_ROOMS 4
 #define MAX_EVENTS 10
 #define TIMEOUT 15
-#define ALIVE_CHECK_INTERVAL 2
+#define ALIVE_CHECK_INTERVAL 4
+#define MAX_PLAYERS_IN_ROOM 2
 
 // Game implementation
 int Game::tick() { return 0; }
@@ -40,7 +43,11 @@ std::string Connection::get_name() {
 }
 
 Server::Server(int port, const std::string &ip_address)
-    : port(port), ip_address(ip_address) {}
+    : port(port), ip_address(ip_address) {
+      for(int i = 0;i<NUMBER_OF_ROOMS;i++){
+        rooms.push_back(Game());
+      }
+    }
 
 int Server::serve() {
   try {
@@ -172,6 +179,7 @@ int Server::process_message(Connection &conn, std::string msg) {
     close_connection(conn.socket);
     return 1;
   }
+
   switch (type) {
   case NICK:
     if (tokens.size() != 3) {
@@ -181,13 +189,64 @@ int Server::process_message(Connection &conn, std::string msg) {
     players.push_back(std::make_unique<Player>(tokens[2]));
     conn.player = players.back().get();
     break;
+  case LIST_ROOMS: {
+
+    if (tokens.size() != 2) {
+      close_connection(conn.socket);
+      return 1;
+    }
+    std::string reply = "ROOM";
+    // Example: append all room names from a vector<std::string> rooms
+    for (const auto &room : rooms) {
+      reply += " " + std::to_string(room.players.size());
+    }
+    reply += "|";
+    send(conn.socket, reply.c_str(), reply.size(), 0);
+    break;
+  }
+  case JOIN: {
+    if (tokens.size() != 3) {
+      close_connection(conn.socket);
+      return 1;
+    }
+    char *endptr = nullptr;
+    int room_id = std::strtol(tokens[2].c_str(), &endptr, 10);
+    if (*endptr != '\0' || room_id > NUMBER_OF_ROOMS ||
+        rooms[room_id].players.size() >= MAX_PLAYERS_IN_ROOM) {
+      close_connection(conn.socket);
+      return 1;
+    }
+    rooms[room_id].players.push_back(conn.player);
+    std::string reply = "LOBY";
+    for (auto player : rooms[room_id].players) {
+      reply += " " + player->nickname;
+    }
+    reply += "|";
+    send(conn.socket, reply.c_str(), reply.size(), 0);
+    break;
+  }
   case INVALID:
     break;
-  case LEAVE:
+  case LEAVE: {
+    if (tokens.size() != 2){
+      close_connection(conn.socket);
+      return 1;
+    }
+    // Remove player from any room they are in
+    for (auto &room : rooms) {
+      auto it = std::find(room.players.begin(), room.players.end(), conn.player);
+      if (it != room.players.end()) {
+        room.players.erase(it);
+      }
+    }
+    std::string reply = "LEFT|";
+    send(conn.socket, reply.c_str(), reply.size(), 0);
     break;
+  }
   case PONG:
     break;
   case MOVE:
+
     break;
   case START:
     break;

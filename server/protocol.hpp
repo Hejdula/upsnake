@@ -10,6 +10,8 @@ enum msg_type {
   MOVE,
   START,
   QUIT,
+  LIST_ROOMS,
+  JOIN,
 };
 
 msg_type get_msg_type(std::string key_token);
