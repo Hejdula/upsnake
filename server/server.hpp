@@ -1,8 +1,10 @@
 #ifndef SERVER_HPP
 #define SERVER_HPP
 
+#include <array>
 #include <bits/types/error_t.h>
 #include <chrono>
+#include <deque>
 #include <list>
 #include <memory>
 #include <memory_resource>
@@ -12,33 +14,70 @@
 #include <string>
 #include <sys/epoll.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+#define GRID_SIZE 10
 
 enum err_t {
   INVALID_MESSAGE,
 };
 
-enum direction {
+enum Direction {
   UP,
   DOWN,
   LEFT,
   RIGHT,
+  DIRECTION_COUNT,
+};
+
+struct Position {
+  int x;
+  int y;
+
+  Position operator+(const Position &other) const {
+    return {x + other.x, y + other.y};
+  }
+  bool operator==(const Position &other) const {
+    return x == other.x && y == other.y;
+  }
 };
 
 class Player {
 public:
   std::string nickname;
-  direction dir;
+  Direction dir;
+  bool alive;
+  int apples;
+  std::deque<Position> body;
   Player(const std::string &nickname) : nickname(nickname) {}
 };
 
 class Game {
+  std::array<std::array<bool, GRID_SIZE>, GRID_SIZE>grid;
+  std::array<Position, Direction::DIRECTION_COUNT> dir_to_pos;
 public:
   std::list<Player *> players;
   bool active;
-  Game() : active(false) {}
+  Position apple;
+  Game() : active(false) {
+    grid.fill({});
+    dir_to_pos = {
+      Position{0, 1}, // UP
+      Position{0, -1},  // DOWN
+      Position{-1, 0}, // LEFT
+      Position{1, 0},  // RIGHT
+    };
+  }
 
-  int tick();
+
+  bool is_empty(Position pos);
+  void print();
+  int hatch();
+  bool slither();
+  Position random_empty_tile();
+  std::string current_move();
+  std::string full_state();
 };
 
 class Connection {

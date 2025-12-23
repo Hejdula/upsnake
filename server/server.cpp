@@ -1,21 +1,23 @@
 #include "server.hpp"
 #include "protocol.hpp"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <ostream>
-#include <algorithm>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
+#include <vector>
 
 #define NUMBER_OF_ROOMS 4
 #define MAX_EVENTS 10
@@ -23,8 +25,127 @@
 #define ALIVE_CHECK_INTERVAL 4
 #define MAX_PLAYERS_IN_ROOM 2
 
-// Game implementation
-int Game::tick() { return 0; }
+void Game::print() {
+
+};
+
+bool Game::is_empty(Position pos) {
+  bool tile_is_full = false;
+  for (Player *player : players) {
+    for (auto part : player->body) {
+      if (pos.x == part.x && pos.y == part.y) {
+        tile_is_full = true;
+      }
+    }
+  }
+  return tile_is_full;
+}
+
+bool Game::slither() {
+  // are there enought players for the game to continue?
+  if (std::count_if(this->players.begin(), this->players.end(),
+                    [](Player *p) { return p->alive; }) < 2) {
+    return false;
+  }
+
+  // newly occupied tiles
+  std::vector<Position> snake_heads;
+
+  // advance the snakes, kill if out of bounds
+  for (Player *player : this->players) {
+    if (!player->alive)
+      continue;
+    Position pos = player->body.front() + Game::dir_to_pos[player->dir];
+    snake_heads.push_back(pos);
+    if (pos.x < 0 || pos.x >= GRID_SIZE || pos.y < 0 || pos.y >= GRID_SIZE){
+      player->alive = false;
+    } else {
+      player->body.push_front(pos);
+    }
+  }
+
+  // check for colisions
+  for (Player *player : this->players) {
+    Position pos = player->body.front();
+    if (grid[pos.y][pos.x]) {
+      player->alive = false;
+    };
+  }
+
+  // check for head to head colisions
+  for (Player *outer : this->players) {
+    if (!outer->alive)
+      continue;
+    for (Player *inner : this->players) {
+      if (outer != inner && inner->alive &&
+          outer->body.front() == inner->body.front()) {
+        outer->alive = false;
+        inner->alive = false;
+      }
+    }
+  }
+
+  // set colision tiles under new heads
+  for (Position head : snake_heads) {
+    grid[head.y][head.x] = true;
+  }
+
+  // remove tail of snakes who did not eat the apple
+  bool apple_eaten = false;
+  for (Player *player : this->players) {
+    if (player->alive && player->body.front() == this->apple) {
+      player->apples++;
+      apple_eaten = true;
+    } else {
+      Position pos = player->body.back();
+      grid[pos.y][pos.x] = false;
+      player->body.pop_back();
+    }
+  }
+
+  // respawn the apple if eaten
+  if (apple_eaten) {
+    this->apple = random_empty_tile();
+  }
+
+  // game ended?
+  if (std::count_if(this->players.begin(), this->players.end(),
+                    [](Player *p) { return p->alive; }) < 2) {
+    return false;
+  }
+
+  return true;
+}
+
+Position Game::random_empty_tile() {
+  Position pos;
+  do {
+    pos = {std::rand() % GRID_SIZE, std::rand() % GRID_SIZE};
+  } while (!is_empty(pos));
+  return pos;
+};
+
+int Game::hatch() {
+  if (this->players.size() < 2 || this->active) {
+    return 0;
+  }
+
+  for (Player *player : this->players) {
+    Position pos = Game::random_empty_tile();
+    player->dir = static_cast<Direction>(std::rand() % 4);
+    player->body.push_front(pos);
+    grid[pos.y][pos.x] = true;
+    player->alive = true;
+  }
+
+  Position pos = Game::random_empty_tile();
+  this->active = true;
+  this->apple = random_empty_tile();
+  return 0;
+}
+
+std::string Game::current_move() { return ""; }
+std::string Game::full_state() { return ""; }
 
 #include <chrono>
 
@@ -44,16 +165,16 @@ std::string Connection::get_name() {
 
 Server::Server(int port, const std::string &ip_address)
     : port(port), ip_address(ip_address) {
-      for(int i = 0;i<NUMBER_OF_ROOMS;i++){
-        rooms.push_back(Game());
-      }
-    }
+  for (int i = 0; i < NUMBER_OF_ROOMS; i++) {
+    rooms.push_back(Game());
+  }
+}
 
 int Server::serve() {
   try {
-    setup();
+    this->setup();
 
-    if (add_socket_to_pool(server_socket))
+    if (this->add_socket_to_pool(server_socket))
       throw std::runtime_error("Failed to add server socket to pool");
 
     while (true) {
@@ -70,18 +191,18 @@ int Server::serve() {
           }
         }
         for (auto conn : to_terminate) {
-          close_connection(conn);
+          this->close_connection(conn);
         }
         std::cout << players.size() << std::endl;
       }
       for (int i = 0; i < event_count; i++) {
         int fd = events[i].data.fd;
         if (fd == server_socket) {
-          handle_new_connection();
+          this->handle_new_connection();
         } else if (connections.count(fd)) {
-          handle_socket_read(fd);
+          this->handle_socket_read(fd);
         } else if (timer_to_conn.count(fd)) {
-          handle_timer(timer_to_conn[fd]);
+          this->handle_timer(timer_to_conn[fd]);
         }
       }
     }
@@ -105,7 +226,7 @@ void Server::handle_timer(int sock_fd) {
   if (std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - conn.last_active)
           .count() > TIMEOUT) {
-    close_connection(sock_fd);
+    this->close_connection(sock_fd);
   }
 
   const char *ping_msg = "PING|";
@@ -126,7 +247,7 @@ void Server::handle_socket_read(int sock_fd) {
   ssize_t bytes_received = recv(sock_fd, &buff[0], buff.size(), 0);
 
   if (bytes_received <= 0) {
-    close_connection(sock_fd);
+    this->close_connection(sock_fd);
     return;
   }
 
@@ -142,7 +263,7 @@ void Server::handle_socket_read(int sock_fd) {
 
     std::string msg = conn.buff.substr(0, separator);
     conn.buff.erase(0, separator + 1);
-    if (process_message(conn, msg)) {
+    if (this->process_message(conn, msg)) {
       return;
     };
     separator = conn.buff.find('|');
@@ -171,19 +292,19 @@ int Server::process_message(Connection &conn, std::string msg) {
   //   std::cout << "token: " << token << std::endl;
   // }
   if (tokens.size() < 2 || tokens[0] != "SNK") {
-    close_connection(conn.socket);
+    this->close_connection(conn.socket);
     return 1;
   }
   msg_type type = get_msg_type(tokens[1]);
   if (type != NICK && type != PONG && !conn.player) {
-    close_connection(conn.socket);
+    this->close_connection(conn.socket);
     return 1;
   }
 
   switch (type) {
   case NICK:
     if (tokens.size() != 3) {
-      close_connection(conn.socket);
+      this->close_connection(conn.socket);
       return 1;
     }
     players.push_back(std::make_unique<Player>(tokens[2]));
@@ -192,7 +313,7 @@ int Server::process_message(Connection &conn, std::string msg) {
   case LIST_ROOMS: {
 
     if (tokens.size() != 2) {
-      close_connection(conn.socket);
+      this->close_connection(conn.socket);
       return 1;
     }
     std::string reply = "ROOM";
@@ -206,16 +327,26 @@ int Server::process_message(Connection &conn, std::string msg) {
   }
   case JOIN: {
     if (tokens.size() != 3) {
-      close_connection(conn.socket);
+      this->close_connection(conn.socket);
       return 1;
     }
     char *endptr = nullptr;
     int room_id = std::strtol(tokens[2].c_str(), &endptr, 10);
     if (*endptr != '\0' || room_id > NUMBER_OF_ROOMS ||
         rooms[room_id].players.size() >= MAX_PLAYERS_IN_ROOM) {
-      close_connection(conn.socket);
+      this->close_connection(conn.socket);
       return 1;
     }
+
+    // remove the player from current rooms
+    for (auto &room : rooms) {
+      auto it =
+          std::find(room.players.begin(), room.players.end(), conn.player);
+      if (it != room.players.end()) {
+        room.players.erase(it);
+      }
+    }
+
     rooms[room_id].players.push_back(conn.player);
     std::string reply = "LOBY";
     for (auto player : rooms[room_id].players) {
@@ -228,13 +359,14 @@ int Server::process_message(Connection &conn, std::string msg) {
   case INVALID:
     break;
   case LEAVE: {
-    if (tokens.size() != 2){
-      close_connection(conn.socket);
+    if (tokens.size() != 2) {
+      this->close_connection(conn.socket);
       return 1;
     }
     // Remove player from any room they are in
     for (auto &room : rooms) {
-      auto it = std::find(room.players.begin(), room.players.end(), conn.player);
+      auto it =
+          std::find(room.players.begin(), room.players.end(), conn.player);
       if (it != room.players.end()) {
         room.players.erase(it);
       }
@@ -258,7 +390,7 @@ int Server::process_message(Connection &conn, std::string msg) {
 }
 
 int Server::add_socket_to_pool(int sock) {
-  if (set_nonblocking(sock) != 0) {
+  if (Server::set_nonblocking(sock) != 0) {
     return -1;
   }
   event.events = EPOLLIN;
