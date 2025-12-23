@@ -26,7 +26,42 @@
 #define MAX_PLAYERS_IN_ROOM 2
 
 void Game::print() {
+  // ANSI color codes for up to 6 players
+  const char* colors[] = {"\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m"};
+  const char* reset = "\033[0m";
+  char field[GRID_SIZE][GRID_SIZE];
+  // Fill field with empty
+  for (int y = 0; y < GRID_SIZE; ++y)
+    for (int x = 0; x < GRID_SIZE; ++x)
+      field[y][x] = '.';
 
+  // Place apple
+  field[apple.y][apple.x] = 'A';
+
+  // Place snakes
+  int pid = 0;
+  for (Player* player : players) {
+    if (!player->alive) continue;
+    for (const Position& part : player->body) {
+      field[part.y][part.x] = '0' + pid;
+    }
+    pid++;
+  }
+
+  // Print field with colors
+  for (int y = 0; y < GRID_SIZE; ++y) {
+    for (int x = 0; x < GRID_SIZE; ++x) {
+      char c = field[y][x];
+      if (c == 'A') {
+        std::cout << "\033[41mA" << reset;
+      } else if (c >= '0' && c <= '5') {
+        std::cout << colors[c - '0'] << c << reset;
+      } else {
+        std::cout << c;
+      }
+    }
+    std::cout << std::endl;
+  }
 };
 
 bool Game::is_empty(Position pos) {
@@ -108,7 +143,7 @@ bool Game::slither() {
     this->apple = random_empty_tile();
   }
 
-  // game ended?
+  // check if game ended after this tick
   if (std::count_if(this->players.begin(), this->players.end(),
                     [](Player *p) { return p->alive; }) < 2) {
     return false;
