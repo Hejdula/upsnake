@@ -164,7 +164,7 @@ Position Game::random_empty_tile() {
 
 int Game::hatch() {
   if (this->players.size() < 2 || this->active) {
-    return 0;
+    return 1;
   }
 
   for (Player *player : this->players) {
@@ -210,7 +210,7 @@ int Server::serve() {
   try {
     this->setup();
 
-    if (this->add_socket_to_pool(server_socket))
+    if (this->add_fd_to_epoll(server_socket))
       throw std::runtime_error("Failed to add server socket to pool");
 
     while (true) {
@@ -237,8 +237,8 @@ int Server::serve() {
           this->handle_new_connection();
         } else if (connections.count(fd)) {
           this->handle_socket_read(fd);
-        } else if (timer_to_conn.count(fd)) {
-          this->handle_timer(timer_to_conn[fd]);
+        } else if (fd == this->global_timer_fd) {
+          this->handle_timer();
         }
       }
     }
@@ -248,25 +248,29 @@ int Server::serve() {
   }
   return 0;
 }
-void Server::handle_timer(int sock_fd) {
+void Server::handle_timer() {
   // Read to clear the event
-  Connection &conn = *connections[sock_fd];
-
   uint64_t expirations;
-  ssize_t s = read(conn.timer_fd, &expirations, sizeof(expirations));
+  ssize_t s = read(this->global_timer_fd, &expirations, sizeof(expirations));
   if (s != sizeof(expirations)) {
     perror("timerfd read");
     return;
   }
 
-  if (std::chrono::duration_cast<std::chrono::seconds>(
-          std::chrono::steady_clock::now() - conn.last_active)
-          .count() > TIMEOUT) {
-    this->close_connection(sock_fd);
-  }
+  // ping connected clients
+  for (auto &pair : connections) {
+    int sock_fd = pair.first;
+    Connection &conn = *pair.second;
 
-  const char *ping_msg = "PING|";
-  send(conn.socket, ping_msg, strlen(ping_msg), 0);
+    if (std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - conn.last_active)
+            .count() > TIMEOUT) {
+      this->close_connection(sock_fd);
+    }
+
+    const char *ping_msg = "PING|";
+    send(conn.socket, ping_msg, strlen(ping_msg), 0);
+  }
 }
 
 void Server::handle_socket_read(int sock_fd) {
@@ -300,6 +304,7 @@ void Server::handle_socket_read(int sock_fd) {
     std::string msg = conn.buff.substr(0, separator);
     conn.buff.erase(0, separator + 1);
     if (this->process_message(conn, msg)) {
+      this->close_connection(conn.socket);
       return;
     };
     separator = conn.buff.find('|');
@@ -327,32 +332,26 @@ int Server::process_message(Connection &conn, std::string msg) {
   // for (const auto &token : tokens) {
   //   std::cout << "token: " << token << std::endl;
   // }
-  if (tokens.size() < 1) {
-    this->close_connection(conn.socket);
+  if (tokens.size() < 1)
     return 1;
-  }
 
   msg_type type = get_msg_type(tokens[0]);
-  if (type != NICK && type != PONG && !conn.player) {
-    this->close_connection(conn.socket);
+  if (type != NICK && type != PONG && !conn.player)
     return 1;
-  }
 
   switch (type) {
   case NICK:
-    if (tokens.size() != 2) {
-      this->close_connection(conn.socket);
+    if (tokens.size() != 2)
       return 1;
-    }
+
     players.push_back(std::make_unique<Player>(tokens[1]));
     conn.player = players.back().get();
     break;
   case LIST_ROOMS: {
 
-    if (tokens.size() != 1) {
-      this->close_connection(conn.socket);
+    if (tokens.size() != 1)
       return 1;
-    }
+
     std::string reply = "ROOM";
     // Example: append all room names from a vector<std::string> rooms
     for (const auto &room : rooms) {
@@ -363,17 +362,14 @@ int Server::process_message(Connection &conn, std::string msg) {
     break;
   }
   case JOIN: {
-    if (tokens.size() != 2) {
-      this->close_connection(conn.socket);
+    if (tokens.size() != 2)
       return 1;
-    }
+
     char *endptr = nullptr;
     int room_id = std::strtol(tokens[2].c_str(), &endptr, 10);
     if (*endptr != '\0' || room_id > NUMBER_OF_ROOMS ||
-        rooms[room_id].players.size() >= MAX_PLAYERS_IN_ROOM) {
-      this->close_connection(conn.socket);
+        rooms[room_id].players.size() >= MAX_PLAYERS_IN_ROOM)
       return 1;
-    }
 
     // remove the player from current rooms
     for (auto &room : rooms) {
@@ -394,12 +390,12 @@ int Server::process_message(Connection &conn, std::string msg) {
     break;
   }
   case INVALID:
+    // return 1;
     break;
   case LEAVE: {
-    if (tokens.size() != 1) {
-      this->close_connection(conn.socket);
+    if (tokens.size() != 1)
       return 1;
-    }
+
     // Remove player from any room they are in
     for (auto &room : rooms) {
       auto it =
@@ -415,10 +411,9 @@ int Server::process_message(Connection &conn, std::string msg) {
   case PONG:
     break;
   case MOVE: {
-    if (tokens.size() != 2 || tokens[1].size() != 1) {
-      this->close_connection(conn.socket);
+    if (tokens.size() != 2 || tokens[1].size() != 1)
       return 1;
-    }
+
     Direction dir;
     switch (tokens[1][0]) {
     case 'U':
@@ -440,8 +435,29 @@ int Server::process_message(Connection &conn, std::string msg) {
     conn.player->dir = dir;
     break;
   }
-  case START:
+  case START: {
+    if (tokens.size() != 2 || tokens[1].size() != 1)
+      return 1;
+
+    auto game = std::find_if(
+        this->rooms.begin(), this->rooms.end(), [&conn](Game &game) {
+          return std::find(game.players.begin(), game.players.end(),
+                           conn.player) != game.players.end();
+        });
+
+    if (game == this->rooms.end())
+      return 1;
+
+    int hatched = game->hatch();
+    if (!hatched) {
+      std::string reply = "STRT FAIL|";
+      send(conn.socket, reply.c_str(), reply.size(), 0);
+      break;
+    }
+    game->active = true;
+
     break;
+  }
   case QUIT:
     break;
   }
@@ -449,7 +465,7 @@ int Server::process_message(Connection &conn, std::string msg) {
   return 0;
 }
 
-int Server::add_socket_to_pool(int sock) {
+int Server::add_fd_to_epoll(int sock) {
   if (Server::set_nonblocking(sock) != 0) {
     return -1;
   }
@@ -469,8 +485,6 @@ void Server::close_connection(int sock_fd) {
   std::cout << "Closing connection with: " << it->second->get_name()
             << std::endl;
   epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_fd, nullptr);
-  close(it->second->timer_fd);
-  timer_to_conn.erase(it->second->timer_fd);
   close(sock_fd);
   connections.erase(sock_fd);
 }
@@ -513,15 +527,9 @@ void Server::handle_new_connection() {
     return;
   }
 
-  timer_to_conn.insert({timer_fd, client_socket});
-
-  // add fds to pool
-  if (add_socket_to_pool(client_socket) || add_socket_to_pool(timer_fd)) {
+  // add fd to pool
+  if (Server::add_fd_to_epoll(client_socket)) {
     throw std::runtime_error("Could not add to epoll pool");
-    // std::cerr << "Failed to add client to pool" << std::endl;
-    // close(client_socket);
-    // connections.erase(client_socket);
-    // return;
   }
 
   std::cout << "Client connected: " << res.first->second->get_name()
@@ -554,6 +562,24 @@ void Server::setup() {
   epoll_fd = epoll_create1(0);
   if (epoll_fd == -1)
     throw std::runtime_error("epoll_create1");
+  
+  // set up timer for client
+  global_timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+  if (global_timer_fd == -1) {
+    perror("timer_fd");
+    return;
+  }
+  itimerspec timer_spec;
+  timer_spec.it_interval.tv_sec = ALIVE_CHECK_INTERVAL;
+  timer_spec.it_interval.tv_nsec = 0;
+  timer_spec.it_value.tv_sec = ALIVE_CHECK_INTERVAL;
+  timer_spec.it_value.tv_nsec = 0;
+  timerfd_settime(global_timer_fd, 0, &timer_spec, nullptr);
+
+  // add timer fd to pool
+  if ( Server::add_fd_to_epoll(global_timer_fd)) {
+    throw std::runtime_error("Could not add to epoll pool");
+  }
 }
 
 int Server::set_nonblocking(int sockfd) {

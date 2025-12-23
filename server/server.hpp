@@ -98,9 +98,9 @@ class Server {
 public:
   Server(int port, const std::string &ip_address);
   int serve();
-  int add_socket_to_pool(int sock);
+  int add_fd_to_epoll(int sock);
   int process_message(Connection &conn, std::string msg);
-  void handle_timer(int fd);
+  void handle_timer();
   void handle_socket_read(int sock_fd);
   void handle_new_connection();
   void setup();
@@ -110,16 +110,16 @@ public:
   // Members
   int port;
   int server_socket;
+  int epoll_fd;
+  int global_timer_fd;
   std::string ip_address;
   sockaddr_in server_addr;
-  int epoll_fd;
   struct epoll_event event, events[10];
   std::vector<Game> rooms;
   std::mutex rooms_mutex;
   std::vector<std::unique_ptr<Player>> players;
   std::mutex players_mutex;
   std::unordered_map<int, std::unique_ptr<Connection>> connections;
-  std::unordered_map<int, int> timer_to_conn;
 };
 
 #endif // SERVER_HPP

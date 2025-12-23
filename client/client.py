@@ -16,7 +16,7 @@ def receive_messages(sock):
                 message, buffer = buffer.split('|', 1)
                 if message == "PING":
                     print("Received PING, sending PONG")
-                    sock.sendall("SNK PONG|".encode())
+                    sock.sendall("PONG|".encode())
                 else:
                     print(f"Server: {message}")
                     
