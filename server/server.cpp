@@ -27,8 +27,9 @@
 
 void Game::print() {
   // ANSI color codes for up to 6 players
-  const char* colors[] = {"\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m"};
-  const char* reset = "\033[0m";
+  const char *colors[] = {"\033[31m", "\033[32m", "\033[33m",
+                          "\033[34m", "\033[35m", "\033[36m"};
+  const char *reset = "\033[0m";
   char field[GRID_SIZE][GRID_SIZE];
   // Fill field with empty
   for (int y = 0; y < GRID_SIZE; ++y)
@@ -40,9 +41,10 @@ void Game::print() {
 
   // Place snakes
   int pid = 0;
-  for (Player* player : players) {
-    if (!player->alive) continue;
-    for (const Position& part : player->body) {
+  for (Player *player : players) {
+    if (!player->alive)
+      continue;
+    for (const Position &part : player->body) {
       field[part.y][part.x] = '0' + pid;
     }
     pid++;
@@ -92,7 +94,7 @@ bool Game::slither() {
       continue;
     Position pos = player->body.front() + Game::dir_to_pos[player->dir];
     snake_heads.push_back(pos);
-    if (pos.x < 0 || pos.x >= GRID_SIZE || pos.y < 0 || pos.y >= GRID_SIZE){
+    if (pos.x < 0 || pos.x >= GRID_SIZE || pos.y < 0 || pos.y >= GRID_SIZE) {
       player->alive = false;
     } else {
       player->body.push_front(pos);
@@ -173,9 +175,8 @@ int Game::hatch() {
     player->alive = true;
   }
 
-  Position pos = Game::random_empty_tile();
-  this->active = true;
   this->apple = random_empty_tile();
+  this->active = true;
   return 0;
 }
 
@@ -326,11 +327,12 @@ int Server::process_message(Connection &conn, std::string msg) {
   // for (const auto &token : tokens) {
   //   std::cout << "token: " << token << std::endl;
   // }
-  if (tokens.size() < 2 || tokens[0] != "SNK") {
+  if (tokens.size() < 1) {
     this->close_connection(conn.socket);
     return 1;
   }
-  msg_type type = get_msg_type(tokens[1]);
+
+  msg_type type = get_msg_type(tokens[0]);
   if (type != NICK && type != PONG && !conn.player) {
     this->close_connection(conn.socket);
     return 1;
@@ -338,16 +340,16 @@ int Server::process_message(Connection &conn, std::string msg) {
 
   switch (type) {
   case NICK:
-    if (tokens.size() != 3) {
+    if (tokens.size() != 2) {
       this->close_connection(conn.socket);
       return 1;
     }
-    players.push_back(std::make_unique<Player>(tokens[2]));
+    players.push_back(std::make_unique<Player>(tokens[1]));
     conn.player = players.back().get();
     break;
   case LIST_ROOMS: {
 
-    if (tokens.size() != 2) {
+    if (tokens.size() != 1) {
       this->close_connection(conn.socket);
       return 1;
     }
@@ -361,7 +363,7 @@ int Server::process_message(Connection &conn, std::string msg) {
     break;
   }
   case JOIN: {
-    if (tokens.size() != 3) {
+    if (tokens.size() != 2) {
       this->close_connection(conn.socket);
       return 1;
     }
@@ -394,7 +396,7 @@ int Server::process_message(Connection &conn, std::string msg) {
   case INVALID:
     break;
   case LEAVE: {
-    if (tokens.size() != 2) {
+    if (tokens.size() != 1) {
       this->close_connection(conn.socket);
       return 1;
     }
@@ -412,9 +414,32 @@ int Server::process_message(Connection &conn, std::string msg) {
   }
   case PONG:
     break;
-  case MOVE:
-
+  case MOVE: {
+    if (tokens.size() != 2 || tokens[1].size() != 1) {
+      this->close_connection(conn.socket);
+      return 1;
+    }
+    Direction dir;
+    switch (tokens[1][0]) {
+    case 'U':
+      dir = UP;
+      break;
+    case 'D':
+      dir = DOWN;
+      break;
+    case 'L':
+      dir = LEFT;
+      break;
+    case 'R':
+      dir = RIGHT;
+      break;
+    default:
+      this->close_connection(conn.socket);
+      return 1;
+    }
+    conn.player->dir = dir;
     break;
+  }
   case START:
     break;
   case QUIT:
