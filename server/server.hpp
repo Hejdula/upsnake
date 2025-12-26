@@ -31,6 +31,16 @@ enum Direction {
   DIRECTION_COUNT,
 };
 
+inline std::string to_string(Direction dir) {
+  switch (dir) {
+    case UP: return "U";
+    case DOWN: return "D";
+    case LEFT: return "L";
+    case RIGHT: return "R";
+    default: return "?";
+  }
+}
+
 struct Position {
   int x;
   int y;
@@ -49,13 +59,17 @@ public:
   Direction dir;
   bool alive;
   int apples;
+  int length;
   std::deque<Position> body;
-  Player(const std::string &nickname) : nickname(nickname) {}
+  std::chrono::steady_clock::time_point last_active;
+  Player(const std::string &nickname) : nickname(nickname), length(3) {}
+
 };
 
 class Game {
-  std::array<std::array<bool, GRID_SIZE>, GRID_SIZE>grid;
+  std::array<std::array<bool, GRID_SIZE>, GRID_SIZE> grid;
   std::array<Position, Direction::DIRECTION_COUNT> dir_to_pos;
+
 public:
   std::list<Player *> players;
   bool active;
@@ -63,13 +77,12 @@ public:
   Game() : active(false) {
     grid.fill({});
     dir_to_pos = {
-      Position{0, 1}, // UP
-      Position{0, -1},  // DOWN
-      Position{-1, 0}, // LEFT
-      Position{1, 0},  // RIGHT
+        Position{0, 1},  // UP
+        Position{0, -1}, // DOWN
+        Position{-1, 0}, // LEFT
+        Position{1, 0},  // RIGHT
     };
   }
-
 
   bool is_empty(Position pos);
   void print();
@@ -82,7 +95,7 @@ public:
 
 class Connection {
 public:
-  Connection(int socket, int timer_fd, sockaddr_in addr);
+  Connection(int socket, sockaddr_in addr);
   std::string get_name();
 
   int socket;
@@ -90,7 +103,6 @@ public:
   std::string buff;
   Player *player;
   std::chrono::steady_clock::time_point last_active;
-  int timer_fd;
 };
 
 class Server;
@@ -101,6 +113,7 @@ public:
   int add_fd_to_epoll(int sock);
   int process_message(Connection &conn, std::string msg);
   void handle_timer();
+  void handle_game_tick();
   void handle_socket_read(int sock_fd);
   void handle_new_connection();
   void setup();
@@ -112,12 +125,14 @@ public:
   int server_socket;
   int epoll_fd;
   int global_timer_fd;
+  int game_timer_fd;
   std::string ip_address;
   sockaddr_in server_addr;
   struct epoll_event event, events[10];
   std::vector<Game> rooms;
   std::mutex rooms_mutex;
   std::vector<std::unique_ptr<Player>> players;
+  std::chrono::steady_clock::time_point last_ping;
   std::mutex players_mutex;
   std::unordered_map<int, std::unique_ptr<Connection>> connections;
 };

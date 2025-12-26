@@ -11,7 +11,6 @@
 #include <iostream>
 #include <memory>
 #include <ostream>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
@@ -21,8 +20,11 @@
 
 #define NUMBER_OF_ROOMS 4
 #define MAX_EVENTS 10
-#define TIMEOUT 15
-#define ALIVE_CHECK_INTERVAL 4
+#define PLAYER_REMOVAL_TIMEOUT 15
+#define CONNECTION_TIMEOUT 10
+#define GLOBAL_TIMER_CHECK 1
+#define GAME_SPEED 2
+#define PING_INTERVAL 4
 #define MAX_PLAYERS_IN_ROOM 2
 
 void Game::print() {
@@ -75,7 +77,7 @@ bool Game::is_empty(Position pos) {
       }
     }
   }
-  return tile_is_full;
+  return !tile_is_full;
 }
 
 bool Game::slither() {
@@ -93,10 +95,10 @@ bool Game::slither() {
     if (!player->alive)
       continue;
     Position pos = player->body.front() + Game::dir_to_pos[player->dir];
-    snake_heads.push_back(pos);
     if (pos.x < 0 || pos.x >= GRID_SIZE || pos.y < 0 || pos.y >= GRID_SIZE) {
       player->alive = false;
     } else {
+      snake_heads.push_back(pos);
       player->body.push_front(pos);
     }
   }
@@ -132,8 +134,9 @@ bool Game::slither() {
   for (Player *player : this->players) {
     if (player->alive && player->body.front() == this->apple) {
       player->apples++;
+      player->length++;
       apple_eaten = true;
-    } else {
+    } else if ((int)player->body.size() > player->length) {
       Position pos = player->body.back();
       grid[pos.y][pos.x] = false;
       player->body.pop_back();
@@ -163,11 +166,18 @@ Position Game::random_empty_tile() {
 };
 
 int Game::hatch() {
+  std::cout << this->players.size() << " : " << this->active << std::endl;
   if (this->players.size() < 2 || this->active) {
     return 1;
   }
 
+  for (auto &row : this->grid) {
+    row.fill(false);
+  }
+
   for (Player *player : this->players) {
+    player->body.clear();
+    player->length = 3;
     Position pos = Game::random_empty_tile();
     player->dir = static_cast<Direction>(std::rand() % 4);
     player->body.push_front(pos);
@@ -180,14 +190,31 @@ int Game::hatch() {
   return 0;
 }
 
-std::string Game::current_move() { return ""; }
-std::string Game::full_state() { return ""; }
+std::string Game::current_move() {
+  std::string move_str = "";
+  move_str +=
+      std::to_string(this->apple.x) + " " + std::to_string(this->apple.y);
+  for (auto player : this->players) {
+    move_str += " " + player->nickname + " " + std::to_string(player->dir);
+  }
+  return move_str;
+}
+std::string Game::full_state() {
+  std::string move_str = "";
+  move_str +=
+      std::to_string(this->apple.x) + " " + std::to_string(this->apple.y);
+  for (auto player : this->players) {
+    move_str += " " + player->nickname + " " +
+                std::to_string(player->body.front().x) + " " +
+                std::to_string(player->body.front().y) + " ";
+  }
+}
 
 #include <chrono>
 
-Connection::Connection(int socket, int timer_fd, sockaddr_in addr)
+Connection::Connection(int socket, sockaddr_in addr)
     : socket(socket), addr(addr), player(nullptr),
-      last_active(std::chrono::steady_clock::now()), timer_fd(timer_fd) {}
+      last_active(std::chrono::steady_clock::now()) {}
 
 std::string Connection::get_name() {
   if (player) {
@@ -200,7 +227,8 @@ std::string Connection::get_name() {
 }
 
 Server::Server(int port, const std::string &ip_address)
-    : port(port), ip_address(ip_address) {
+    : port(port), ip_address(ip_address),
+      last_ping(std::chrono::steady_clock::now()) {
   for (int i = 0; i < NUMBER_OF_ROOMS; i++) {
     rooms.push_back(Game());
   }
@@ -215,30 +243,16 @@ int Server::serve() {
 
     while (true) {
       int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-      if (!event_count) {
-        // timeout
-        std::set<int> to_terminate;
-        for (auto &conn : connections) {
-          if (conn.first != server_socket &&
-              std::chrono::duration_cast<std::chrono::seconds>(
-                  std::chrono::steady_clock::now() - conn.second->last_active)
-                      .count() > TIMEOUT) {
-            to_terminate.insert(conn.first);
-          }
-        }
-        for (auto conn : to_terminate) {
-          this->close_connection(conn);
-        }
-        std::cout << players.size() << std::endl;
-      }
       for (int i = 0; i < event_count; i++) {
         int fd = events[i].data.fd;
         if (fd == server_socket) {
           this->handle_new_connection();
-        } else if (connections.count(fd)) {
-          this->handle_socket_read(fd);
         } else if (fd == this->global_timer_fd) {
           this->handle_timer();
+        } else if (fd == this->game_timer_fd) {
+          this->handle_game_tick();
+        } else if (connections.count(fd)) {
+          this->handle_socket_read(fd);
         }
       }
     }
@@ -248,6 +262,26 @@ int Server::serve() {
   }
   return 0;
 }
+void Server::handle_game_tick() {
+  uint64_t expirations;
+  ssize_t s = read(this->game_timer_fd, &expirations, sizeof(expirations));
+  if (s != sizeof(expirations)) {
+    perror("gametimerfd read");
+    return;
+  }
+
+  for (Game &game : rooms) {
+    if (game.active) {
+      bool game_continues = game.slither();
+      if (game_continues) {
+        game.print();
+      } else {
+        game.active = false;
+      };
+    }
+  }
+}
+
 void Server::handle_timer() {
   // Read to clear the event
   uint64_t expirations;
@@ -257,19 +291,54 @@ void Server::handle_timer() {
     return;
   }
 
-  // ping connected clients
+  // check for timeouts
   for (auto &pair : connections) {
-    int sock_fd = pair.first;
     Connection &conn = *pair.second;
-
     if (std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - conn.last_active)
-            .count() > TIMEOUT) {
-      this->close_connection(sock_fd);
+            .count() > CONNECTION_TIMEOUT) {
+      this->close_connection(conn.socket);
+    }
+  }
+
+  // removing inactive players
+  {
+    std::vector<Player *> to_remove;
+    for (auto &player : players) {
+      if (std::chrono::duration_cast<std::chrono::seconds>(
+              std::chrono::steady_clock::now() - player->last_active)
+              .count() > PLAYER_REMOVAL_TIMEOUT) {
+        to_remove.push_back(player.get());
+      }
     }
 
-    const char *ping_msg = "PING|";
-    send(conn.socket, ping_msg, strlen(ping_msg), 0);
+    for (Player *p : to_remove) {
+      // Remove player from all rooms/games
+      for (auto &room : rooms) {
+        auto it = std::find(room.players.begin(), room.players.end(), p);
+        if (it != room.players.end()) {
+          room.players.erase(it);
+          // TODO! room.broadcast();
+        }
+      }
+      auto it = std::find_if(
+          players.begin(), players.end(),
+          [p](const std::unique_ptr<Player> &ptr) { return ptr.get() == p; });
+      if (it != players.end()) {
+        players.erase(it);
+      }
+    }
+  }
+
+  // ping connected clients
+  if (std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - this->last_ping)
+          .count() > PING_INTERVAL) {
+    for (auto &pair : connections) {
+      const char *ping_msg = "PING|";
+      send(pair.first, ping_msg, strlen(ping_msg), 0);
+    }
+    this->last_ping = std::chrono::steady_clock::now();
   }
 }
 
@@ -291,22 +360,28 @@ void Server::handle_socket_read(int sock_fd) {
     return;
   }
 
-  conn.last_active = std::chrono::steady_clock::now();
-
   buff.resize(bytes_received);
   conn.buff.append(buff);
 
+  // log
   std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
 
   size_t separator = conn.buff.find('|');
-  while (separator != std::string::npos) {
 
+  // process whole messages
+  while (separator != std::string::npos) {
     std::string msg = conn.buff.substr(0, separator);
     conn.buff.erase(0, separator + 1);
     if (this->process_message(conn, msg)) {
       this->close_connection(conn.socket);
       return;
     };
+
+    // mark the connection and its player as active
+    conn.last_active = std::chrono::steady_clock::now();
+    if (conn.player) {
+      conn.player->last_active = std::chrono::steady_clock::now();
+    }
     separator = conn.buff.find('|');
   }
 }
@@ -366,10 +441,14 @@ int Server::process_message(Connection &conn, std::string msg) {
       return 1;
 
     char *endptr = nullptr;
-    int room_id = std::strtol(tokens[2].c_str(), &endptr, 10);
-    if (*endptr != '\0' || room_id > NUMBER_OF_ROOMS ||
-        rooms[room_id].players.size() >= MAX_PLAYERS_IN_ROOM)
+    int room_id = std::strtol(tokens[1].c_str(), &endptr, 10);
+    if (*endptr != '\0' || room_id > NUMBER_OF_ROOMS || room_id < 0)
       return 1;
+    if (rooms[room_id].players.size() >= MAX_PLAYERS_IN_ROOM) {
+      const char *reply = "FULL|";
+      send(conn.socket, reply, strlen(reply), 0);
+      return 0;
+    }
 
     // remove the player from current rooms
     for (auto &room : rooms) {
@@ -404,8 +483,8 @@ int Server::process_message(Connection &conn, std::string msg) {
         room.players.erase(it);
       }
     }
-    std::string reply = "LEFT|";
-    send(conn.socket, reply.c_str(), reply.size(), 0);
+    const char *reply = "LEFT|";
+    send(conn.socket, reply, strlen(reply), 0);
     break;
   }
   case PONG:
@@ -436,7 +515,7 @@ int Server::process_message(Connection &conn, std::string msg) {
     break;
   }
   case START: {
-    if (tokens.size() != 2 || tokens[1].size() != 1)
+    if (tokens.size() != 1)
       return 1;
 
     auto game = std::find_if(
@@ -445,23 +524,26 @@ int Server::process_message(Connection &conn, std::string msg) {
                            conn.player) != game.players.end();
         });
 
-    if (game == this->rooms.end())
+    if (game == this->rooms.end()) {
+      std::cout << "Could not find game player is in";
       return 1;
+    }
 
-    int hatched = game->hatch();
-    if (!hatched) {
-      std::string reply = "STRT FAIL|";
-      send(conn.socket, reply.c_str(), reply.size(), 0);
+    int hatch_failed = game->hatch();
+    if (hatch_failed) {
+      const char *reply = "STRT FAIL|";
+      send(conn.socket, reply, strlen(reply), 0);
       break;
     }
     game->active = true;
 
+    const char *reply = "STRT OK|";
+    send(conn.socket, reply, strlen(reply), 0);
     break;
   }
   case QUIT:
     break;
   }
-
   return 0;
 }
 
@@ -493,33 +575,21 @@ void Server::handle_new_connection() {
   sockaddr_in client_addr = {};
   socklen_t addrlen = sizeof(client_addr);
 
-  // set up timer for client
-  int timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
-  if (timer_fd == -1) {
-    perror("timer_fd");
-    return;
-  }
-  itimerspec timer_spec;
-  timer_spec.it_interval.tv_sec = ALIVE_CHECK_INTERVAL;
-  timer_spec.it_interval.tv_nsec = 0;
-  timer_spec.it_value.tv_sec = ALIVE_CHECK_INTERVAL;
-  timer_spec.it_value.tv_nsec = 0;
-  timerfd_settime(timer_fd, 0, &timer_spec, nullptr);
-
   // set up new connection
   int client_socket = accept(server_socket, (sockaddr *)&client_addr, &addrlen);
   if (client_socket == -1) {
     perror("accept");
     return;
   }
+
   if (set_nonblocking(client_socket) != 0) {
     std::cerr << "Failed to set non-blocking for client" << std::endl;
     close(client_socket);
     return;
   }
   auto res = connections.emplace(
-      client_socket, std::make_unique<Connection>(
-                         Connection(client_socket, timer_fd, client_addr)));
+      client_socket,
+      std::make_unique<Connection>(Connection(client_socket, client_addr)));
   if (!res.second) {
     std::cerr << "Error: Connection already exists for fd " << client_socket
               << std::endl;
@@ -562,7 +632,7 @@ void Server::setup() {
   epoll_fd = epoll_create1(0);
   if (epoll_fd == -1)
     throw std::runtime_error("epoll_create1");
-  
+
   // set up timer for client
   global_timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
   if (global_timer_fd == -1) {
@@ -570,14 +640,27 @@ void Server::setup() {
     return;
   }
   itimerspec timer_spec;
-  timer_spec.it_interval.tv_sec = ALIVE_CHECK_INTERVAL;
+  timer_spec.it_interval.tv_sec = GLOBAL_TIMER_CHECK;
   timer_spec.it_interval.tv_nsec = 0;
-  timer_spec.it_value.tv_sec = ALIVE_CHECK_INTERVAL;
+  timer_spec.it_value.tv_sec = GLOBAL_TIMER_CHECK;
   timer_spec.it_value.tv_nsec = 0;
   timerfd_settime(global_timer_fd, 0, &timer_spec, nullptr);
 
+  // set up timer for game loops
+  game_timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+  if (game_timer_fd == -1) {
+    perror("timer_fd");
+    return;
+  }
+  timer_spec.it_interval.tv_sec = GAME_SPEED;
+  timer_spec.it_interval.tv_nsec = 0;
+  timer_spec.it_value.tv_sec = GAME_SPEED;
+  timer_spec.it_value.tv_nsec = 0;
+  timerfd_settime(game_timer_fd, 0, &timer_spec, nullptr);
+
   // add timer fd to pool
-  if ( Server::add_fd_to_epoll(global_timer_fd)) {
+  if (Server::add_fd_to_epoll(global_timer_fd) ||
+      Server::add_fd_to_epoll(game_timer_fd)) {
     throw std::runtime_error("Could not add to epoll pool");
   }
 }
