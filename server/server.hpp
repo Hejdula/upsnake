@@ -31,7 +31,7 @@ enum Direction {
   DIRECTION_COUNT,
 };
 
-inline std::string to_string(Direction dir) {
+inline std::string dir_to_string(Direction dir) {
   switch (dir) {
     case UP: return "U";
     case DOWN: return "D";
@@ -47,6 +47,9 @@ struct Position {
 
   Position operator+(const Position &other) const {
     return {x + other.x, y + other.y};
+  }
+  Position operator-(const Position &other) const {
+    return {x - other.x, y - other.y};
   }
   bool operator==(const Position &other) const {
     return x == other.x && y == other.y;

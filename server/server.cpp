@@ -200,14 +200,31 @@ std::string Game::current_move() {
   return move_str;
 }
 std::string Game::full_state() {
-  std::string move_str = "";
-  move_str +=
+  std::string state_str = "";
+  state_str +=
       std::to_string(this->apple.x) + " " + std::to_string(this->apple.y);
   for (auto player : this->players) {
-    move_str += " " + player->nickname + " " +
-                std::to_string(player->body.front().x) + " " +
-                std::to_string(player->body.front().y) + " ";
+    if (player->body.size() == 0)
+      continue;
+    state_str += " " + player->nickname + " " +
+                 std::to_string(player->body.front().x) + " " +
+                 std::to_string(player->body.front().y) + " ";
+
+    state_str += "H"; // H for head if the player only has head so far;
+    Position last_body_part = player->body.front();
+    for (auto body_part : player->body) {
+      if (last_body_part == body_part)
+        continue;
+      for (int dir = 0; dir < DIRECTION_COUNT; ++dir) {
+        if (dir_to_pos[dir] == last_body_part - body_part) {
+          state_str += dir_to_string(static_cast<Direction>(dir));
+          ;
+        };
+      }
+      last_body_part = body_part;
+    }
   }
+  return state_str;
 }
 
 #include <chrono>
@@ -272,9 +289,17 @@ void Server::handle_game_tick() {
 
   for (Game &game : rooms) {
     if (game.active) {
+      std::cout << game.full_state() << std::endl;
+      std::cout << game.current_move() << std::endl;
+      std::cout << "-----" << std::endl;
+      game.print();
+      std::cout << "-----" << std::endl;
       bool game_continues = game.slither();
       if (game_continues) {
+        std::cout << "-----" << std::endl;
         game.print();
+        std::cout << "-----" << std::endl;
+
       } else {
         game.active = false;
       };
