@@ -18,6 +18,7 @@
 #include <vector>
 
 #define GRID_SIZE 10
+#define INITIAL_SNAKE_LENGTH 3
 
 enum err_t {
   INVALID_MESSAGE,
@@ -33,11 +34,16 @@ enum Direction {
 
 inline std::string dir_to_string(Direction dir) {
   switch (dir) {
-    case UP: return "U";
-    case DOWN: return "D";
-    case LEFT: return "L";
-    case RIGHT: return "R";
-    default: return "?";
+  case UP:
+    return "U";
+  case DOWN:
+    return "D";
+  case LEFT:
+    return "L";
+  case RIGHT:
+    return "R";
+  default:
+    return "?";
   }
 }
 
@@ -60,13 +66,16 @@ class Player {
 public:
   std::string nickname;
   Direction dir;
+  Direction last_move_dir;
   bool alive;
+  bool updated;
   int apples;
   int length;
   std::deque<Position> body;
   std::chrono::steady_clock::time_point last_active;
-  Player(const std::string &nickname) : nickname(nickname), length(3) {}
-
+  Player(const std::string &nickname)
+      : nickname(nickname), last_move_dir(DIRECTION_COUNT),
+        length(INITIAL_SNAKE_LENGTH) {}
 };
 
 class Game {
@@ -76,6 +85,7 @@ class Game {
 public:
   std::list<Player *> players;
   bool active;
+  bool waiting;
   Position apple;
   Game() : active(false) {
     grid.fill({});
@@ -121,6 +131,7 @@ public:
   void handle_new_connection();
   void setup();
   void close_connection(int sock_fd);
+  void broadcast_game(Game &game, std::string msg);
   static int set_nonblocking(int sockfd);
 
   // Members
@@ -133,10 +144,8 @@ public:
   sockaddr_in server_addr;
   struct epoll_event event, events[10];
   std::vector<Game> rooms;
-  std::mutex rooms_mutex;
   std::vector<std::unique_ptr<Player>> players;
   std::chrono::steady_clock::time_point last_ping;
-  std::mutex players_mutex;
   std::unordered_map<int, std::unique_ptr<Connection>> connections;
 };
 

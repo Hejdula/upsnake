@@ -2,6 +2,7 @@
 #include "protocol.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -92,8 +93,10 @@ bool Game::slither() {
 
   // advance the snakes, kill if out of bounds
   for (Player *player : this->players) {
+
     if (!player->alive)
       continue;
+    player->updated = false;
     Position pos = player->body.front() + Game::dir_to_pos[player->dir];
     if (pos.x < 0 || pos.x >= GRID_SIZE || pos.y < 0 || pos.y >= GRID_SIZE) {
       player->alive = false;
@@ -199,6 +202,7 @@ std::string Game::current_move() {
   }
   return move_str;
 }
+
 std::string Game::full_state() {
   std::string state_str = "";
   state_str +=
@@ -226,8 +230,6 @@ std::string Game::full_state() {
   }
   return state_str;
 }
-
-#include <chrono>
 
 Connection::Connection(int socket, sockaddr_in addr)
     : socket(socket), addr(addr), player(nullptr),
@@ -279,6 +281,18 @@ int Server::serve() {
   }
   return 0;
 }
+
+void Server::broadcast_game(Game &game, std::string msg) {
+  for (Player *player : game.players) {
+    auto it = std::find_if(
+        this->connections.begin(), this->connections.end(),
+        [player](const auto &pair) { return pair.second->player == player; });
+    if (it != this->connections.end()) {
+      send(it->second->socket, msg.c_str(), msg.size(), 0);
+    }
+  }
+}
+
 void Server::handle_game_tick() {
   uint64_t expirations;
   ssize_t s = read(this->game_timer_fd, &expirations, sizeof(expirations));
@@ -289,6 +303,21 @@ void Server::handle_game_tick() {
 
   for (Game &game : rooms) {
     if (game.active) {
+      std::vector<Player *> inactive;
+      for (auto player : game.players)
+        if (!player->updated)
+          inactive.push_back(player);
+
+      if (inactive.size()) {
+        std::string msg = "WAIT";
+        for (auto player : inactive) {
+          msg += " " + player->nickname;
+        }
+        msg += "|";
+        broadcast_game(game, msg);
+        continue;
+      };
+
       std::cout << game.full_state() << std::endl;
       std::cout << game.current_move() << std::endl;
       std::cout << "-----" << std::endl;
@@ -299,7 +328,6 @@ void Server::handle_game_tick() {
         std::cout << "-----" << std::endl;
         game.print();
         std::cout << "-----" << std::endl;
-
       } else {
         game.active = false;
       };
@@ -518,25 +546,30 @@ int Server::process_message(Connection &conn, std::string msg) {
     if (tokens.size() != 2 || tokens[1].size() != 1)
       return 1;
 
-    Direction dir;
     switch (tokens[1][0]) {
     case 'U':
-      dir = UP;
+      if (conn.player->last_move_dir == DIRECTION_COUNT ||
+          conn.player->last_move_dir != DOWN)
+        conn.player->dir = UP;
       break;
     case 'D':
-      dir = DOWN;
+      if (conn.player->last_move_dir == DIRECTION_COUNT ||
+          conn.player->last_move_dir != UP)
+        conn.player->dir = DOWN;
       break;
     case 'L':
-      dir = LEFT;
+      if (conn.player->last_move_dir == DIRECTION_COUNT ||
+          conn.player->last_move_dir != RIGHT)
+        conn.player->dir = LEFT;
       break;
     case 'R':
-      dir = RIGHT;
+      if (conn.player->last_move_dir == DIRECTION_COUNT ||
+          conn.player->last_move_dir != LEFT)
+        conn.player->dir = RIGHT;
       break;
     default:
-      this->close_connection(conn.socket);
       return 1;
     }
-    conn.player->dir = dir;
     break;
   }
   case START: {
@@ -561,11 +594,15 @@ int Server::process_message(Connection &conn, std::string msg) {
       break;
     }
     game->active = true;
+    game->print();
 
     const char *reply = "STRT OK|";
     send(conn.socket, reply, strlen(reply), 0);
     break;
   }
+  case TACK: {
+    conn.player->updated = true;
+  } break;
   case QUIT:
     break;
   }

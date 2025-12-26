@@ -39,7 +39,7 @@ try:
 			break
 
 		try:
-			formatted = f"{msg}|"
+			formatted = f"{msg.upper()}|"
 			s.sendall(formatted.encode())
 		except BrokenPipeError:
 			print("Server disconnected (broken pipe)")
