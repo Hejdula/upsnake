@@ -53,6 +53,16 @@ void Game::print() {
     pid++;
   }
 
+  // Print player names in their color
+  pid = 0;
+  for (Player *player : players) {
+    if (!player->alive)
+      continue;
+    std::cout << colors[pid % 6] << player->nickname << reset << " ";
+    pid++;
+  }
+  std::cout << std::endl;
+
   // Print field with colors
   for (int y = 0; y < GRID_SIZE; ++y) {
     for (int x = 0; x < GRID_SIZE; ++x) {
@@ -189,7 +199,7 @@ int Game::hatch() {
   }
 
   this->apple = random_empty_tile();
-  this->active = true;
+  this->active = true; 
   return 0;
 }
 
@@ -198,7 +208,7 @@ std::string Game::current_move() {
   move_str +=
       std::to_string(this->apple.x) + " " + std::to_string(this->apple.y);
   for (auto player : this->players) {
-    move_str += " " + player->nickname + " " + std::to_string(player->dir);
+    move_str += " " + player->nickname + " " + dir_to_string(player->dir);
   }
   return move_str;
 }
@@ -320,15 +330,14 @@ void Server::handle_game_tick() {
 
       std::cout << game.full_state() << std::endl;
       std::cout << game.current_move() << std::endl;
-      std::cout << "-----" << std::endl;
-      game.print();
-      std::cout << "-----" << std::endl;
       bool game_continues = game.slither();
       if (game_continues) {
+        broadcast_game(game, game.current_move() + "|");
         std::cout << "-----" << std::endl;
         game.print();
         std::cout << "-----" << std::endl;
       } else {
+        //TODO send win/loss to players
         game.active = false;
       };
     }
@@ -468,13 +477,25 @@ int Server::process_message(Connection &conn, std::string msg) {
     return 1;
 
   switch (type) {
-  case NICK:
+  case NICK: {
+
     if (tokens.size() != 2)
       return 1;
 
-    players.push_back(std::make_unique<Player>(tokens[1]));
-    conn.player = players.back().get();
+    std::string nick = tokens[1];
+    auto it =
+        std::find_if(this->players.begin(), this->players.end(),
+                     [nick](const auto& player) { return player->nickname == nick; });
+
+    if (it == this->players.end()) {
+      players.push_back(std::make_unique<Player>(tokens[1]));
+      conn.player = players.back().get();
+      break;
+    }
+
+
     break;
+  }
   case LIST_ROOMS: {
 
     if (tokens.size() != 1)
@@ -522,6 +543,8 @@ int Server::process_message(Connection &conn, std::string msg) {
     break;
   }
   case INVALID:
+    std::cout << "invalid message: [" << msg << "] from " << conn.get_name()
+              << std::endl;
     // return 1;
     break;
   case LEAVE: {
@@ -570,6 +593,8 @@ int Server::process_message(Connection &conn, std::string msg) {
     default:
       return 1;
     }
+    const char *msg = "MOVD|";
+    send(conn.socket, msg, strlen(msg), 0);
     break;
   }
   case START: {
@@ -598,6 +623,7 @@ int Server::process_message(Connection &conn, std::string msg) {
 
     const char *reply = "STRT OK|";
     send(conn.socket, reply, strlen(reply), 0);
+    broadcast_game(*game, game->full_state() + "|");
     break;
   }
   case TACK: {
