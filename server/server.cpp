@@ -199,7 +199,7 @@ int Game::hatch() {
   }
 
   this->apple = random_empty_tile();
-  this->active = true; 
+  this->active = true;
   return 0;
 }
 
@@ -332,12 +332,33 @@ void Server::handle_game_tick() {
       std::cout << game.current_move() << std::endl;
       bool game_continues = game.slither();
       if (game_continues) {
-        broadcast_game(game, game.current_move() + "|");
+        broadcast_game(game, "TICK " + game.full_state() + "|");
         std::cout << "-----" << std::endl;
         game.print();
         std::cout << "-----" << std::endl;
       } else {
-        //TODO send win/loss to players
+        if (!std::count_if(game.players.begin(), game.players.end(),
+                           [](Player *player) { return player->alive; })) {
+          broadcast_game(game, "DRAW|");
+        } else {
+          for (Player *player : game.players) {
+
+            auto it =
+                std::find_if(this->connections.begin(), this->connections.end(),
+                             [player](const auto &pair) {
+                               return pair.second->player == player;
+                             });
+            if (it == this->connections.end())
+              continue;
+            if (player->alive) {
+              const char *win = "WINS|";
+              send(it->second->socket, win, strlen(win), 0);
+            } else {
+              const char *lose = "LOSE|";
+              send(it->second->socket, lose, strlen(lose), 0);
+            }
+          }
+        }
         game.active = false;
       };
     }
@@ -483,16 +504,15 @@ int Server::process_message(Connection &conn, std::string msg) {
       return 1;
 
     std::string nick = tokens[1];
-    auto it =
-        std::find_if(this->players.begin(), this->players.end(),
-                     [nick](const auto& player) { return player->nickname == nick; });
+    auto it = std::find_if(
+        this->players.begin(), this->players.end(),
+        [nick](const auto &player) { return player->nickname == nick; });
 
     if (it == this->players.end()) {
       players.push_back(std::make_unique<Player>(tokens[1]));
       conn.player = players.back().get();
       break;
     }
-
 
     break;
   }
@@ -623,7 +643,7 @@ int Server::process_message(Connection &conn, std::string msg) {
 
     const char *reply = "STRT OK|";
     send(conn.socket, reply, strlen(reply), 0);
-    broadcast_game(*game, game->full_state() + "|");
+    broadcast_game(*game, "TICK " + game->full_state() + "|");
     break;
   }
   case TACK: {
