@@ -113,6 +113,7 @@ bool Game::slither() {
     } else {
       snake_heads.push_back(pos);
       player->body.push_front(pos);
+      player->last_move_dir = player->dir;
     }
   }
 
@@ -544,12 +545,18 @@ int Server::process_message(Connection &conn, std::string msg) {
       return 0;
     }
 
-    // remove the player from current rooms
+    // Remove player from any room they are in
     for (auto &room : rooms) {
       auto it =
           std::find(room.players.begin(), room.players.end(), conn.player);
       if (it != room.players.end()) {
         room.players.erase(it);
+        std::string update_msg = "LOBY";
+        for (auto player : room.players) {
+          update_msg += " " + player->nickname;
+        }
+        update_msg += "|";
+        broadcast_game(room, update_msg);
       }
     }
 
@@ -559,7 +566,7 @@ int Server::process_message(Connection &conn, std::string msg) {
       reply += " " + player->nickname;
     }
     reply += "|";
-    send(conn.socket, reply.c_str(), reply.size(), 0);
+    broadcast_game(rooms[room_id], reply);
     break;
   }
   case INVALID:
@@ -577,6 +584,12 @@ int Server::process_message(Connection &conn, std::string msg) {
           std::find(room.players.begin(), room.players.end(), conn.player);
       if (it != room.players.end()) {
         room.players.erase(it);
+        std::string update_msg = "LOBY";
+        for (auto player : room.players) {
+          update_msg += " " + player->nickname;
+        }
+        update_msg += "|";
+        broadcast_game(room, update_msg);
       }
     }
     const char *reply = "LEFT|";
@@ -591,23 +604,19 @@ int Server::process_message(Connection &conn, std::string msg) {
 
     switch (tokens[1][0]) {
     case 'U':
-      if (conn.player->last_move_dir == DIRECTION_COUNT ||
-          conn.player->last_move_dir != DOWN)
+      if (conn.player->last_move_dir != DOWN)
         conn.player->dir = UP;
       break;
     case 'D':
-      if (conn.player->last_move_dir == DIRECTION_COUNT ||
-          conn.player->last_move_dir != UP)
+      if (conn.player->last_move_dir != UP)
         conn.player->dir = DOWN;
       break;
     case 'L':
-      if (conn.player->last_move_dir == DIRECTION_COUNT ||
-          conn.player->last_move_dir != RIGHT)
+      if (conn.player->last_move_dir != RIGHT)
         conn.player->dir = LEFT;
       break;
     case 'R':
-      if (conn.player->last_move_dir == DIRECTION_COUNT ||
-          conn.player->last_move_dir != LEFT)
+      if (conn.player->last_move_dir != LEFT)
         conn.player->dir = RIGHT;
       break;
     default:
