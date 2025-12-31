@@ -4,7 +4,7 @@ import threading
 import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                             QStackedWidget, QListWidget, QMessageBox, QGridLayout, QFrame)
+                             QStackedWidget, QListWidget, QListWidgetItem, QMessageBox, QGridLayout, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QPainter, QColor, QBrush, QKeyEvent
 
@@ -22,16 +22,10 @@ INT_TO_DIR = ['U', 'D', 'L', 'R']
 class GameState:
     def __init__(self):
         self.apple = (0, 0)
-        self.players = {} # nick -> {'body': [(x,y), ...], 'color': QColor}
+        self.players = {} # nick -> {'body': [(x,y), ...], 'alive': bool}
         self.my_nick = ""
         self.grid_size = GRID_SIZE
-        self.colors = [QColor('red'), QColor('green'), QColor('blue'), 
-                       QColor('yellow'), QColor('magenta'), QColor('cyan')]
         self.waiting_for = [] # List of nicks server is waiting for
-
-    def get_color(self, nick):
-        hash_val = sum(ord(c) for c in nick)
-        return self.colors[hash_val % len(self.colors)]
 
 class NetworkWorker(QObject):
     msg_received = pyqtSignal(str)
@@ -172,8 +166,9 @@ class LobbyWidget(QWidget):
     start_game = pyqtSignal()
     leave_room = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, game_state):
         super().__init__()
+        self.game_state = game_state
         layout = QVBoxLayout()
         
         self.players_list = QListWidget()
@@ -184,7 +179,7 @@ class LobbyWidget(QWidget):
         self.leave_btn = QPushButton("Leave Room")
         self.leave_btn.clicked.connect(self.leave_room.emit)
         
-        layout.addWidget(QLabel("Lobby - Waiting for players"))
+        layout.addWidget(QLabel("Lobby"))
         layout.addWidget(self.players_list)
         layout.addWidget(self.start_btn)
         layout.addWidget(self.leave_btn)
@@ -194,7 +189,10 @@ class LobbyWidget(QWidget):
     def update_players(self, players):
         self.players_list.clear()
         for p in players:
-            self.players_list.addItem(p)
+            item = QListWidgetItem(p)
+            if p == self.game_state.my_nick: 
+                item.setForeground(QBrush(QColor("green")))
+            self.players_list.addItem(item)
 
 class GameBoard(QWidget):
     def __init__(self, game_state):
@@ -227,32 +225,30 @@ class GameBoard(QWidget):
         
         # Draw Apple
         ax, ay = self.game_state.apple
-        ay = -ay
-        # Server coords: (0,0) bottom-left? Or top-left?
-        # Assuming standard matrix: (0,0) top-left for now.
-        # If server uses (0,0) as bottom-left, I need to flip Y.
-        # Let's try standard top-left first.
+        ay = ay
         
         painter.setBrush(QBrush(QColor('red')))
         painter.drawEllipse(int(ax * cell_w), int(ay * cell_h), int(cell_w), int(cell_h))
         
         # Draw Players
         for nick, data in self.game_state.players.items():
-            color = self.game_state.get_color(nick)
+            color = QColor("green") if nick == self.game_state.my_nick else QColor("red")
             painter.setBrush(QBrush(color))
             
-            for i, (bx, by) in enumerate(data['body']):
-                # Head is slightly different or just same color
-                if i == 0:
-                    painter.setBrush(QBrush(color.lighter(130)))
-                    # Draw Nickname above head
-                    painter.setPen(QColor('white'))
-                    painter.drawText(int(bx * cell_w), int(by * cell_h) - 5, nick)
-                    painter.setPen(Qt.PenStyle.NoPen)
-                else:
-                    painter.setBrush(QBrush(color))
-                
-                painter.drawRect(int(bx * cell_w), int(by * cell_h), int(cell_w), int(cell_h))
+            if data['alive']:
+                for i, (bx, by) in enumerate(data['body']):
+                    # Head is slightly different
+                    if i == 0:
+                        painter.setBrush(QBrush(color.lighter(130)))
+                    else:
+                        painter.setBrush(QBrush(color))
+                    
+                    painter.drawRect(int(bx * cell_w), int(by * cell_h), int(cell_w), int(cell_h))
+            else:
+                painter.setBrush(QBrush(QColor("grey")))
+                for i, (bx, by) in enumerate(data['body']):
+                    painter.drawRect(int(bx * cell_w), int(by * cell_h), int(cell_w), int(cell_h))
+
 
         # Draw Waiting Status
         if self.game_state.waiting_for:
@@ -267,18 +263,13 @@ class GameWidget(QWidget):
     def __init__(self, game_state):
         super().__init__()
         self.game_state = game_state
-        layout = QVBoxLayout()
+        layout = QHBoxLayout()
         
         self.board = GameBoard(game_state)
-        self.info_label = QLabel("Game Started")
+        self.lobby = LobbyWidget(game_state)
         
-        self.leave_btn = QPushButton("Leave Game")
-        self.leave_btn.clicked.connect(self.leave_game.emit)
-        self.leave_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Keep focus on board
-        
-        layout.addWidget(self.info_label)
-        layout.addWidget(self.board, 1)
-        layout.addWidget(self.leave_btn)
+        layout.addWidget(self.lobby, 1)
+        layout.addWidget(self.board, 3)
         
         self.setLayout(layout)
 
@@ -315,17 +306,17 @@ class MainWindow(QMainWindow):
         self.room_list_widget.join_room.connect(self.join_room)
         self.room_list_widget.refresh_request.connect(self.refresh_rooms)
         
-        self.lobby_widget = LobbyWidget()
-        self.lobby_widget.start_game.connect(self.start_game)
-        self.lobby_widget.leave_room.connect(self.leave_room)
+        # self.lobby_widget = LobbyWidget()
+        # self.lobby_widget.start_game.connect(self.start_game)
+        # self.lobby_widget.leave_room.connect(self.leave_room)
         
         self.game_widget = GameWidget(self.game_state)
+        self.game_widget.lobby.start_game.connect(self.start_game)
+        self.game_widget.lobby.leave_room.connect(self.leave_room)
         self.game_widget.move_request.connect(self.send_move)
-        self.game_widget.leave_game.connect(self.leave_game)
         
         self.stack.addWidget(self.login_widget)
         self.stack.addWidget(self.room_list_widget)
-        self.stack.addWidget(self.lobby_widget)
         self.stack.addWidget(self.game_widget)
         
         self.setCentralWidget(self.stack)
@@ -347,11 +338,6 @@ class MainWindow(QMainWindow):
         self.network.send("STRT")
 
     def leave_room(self):
-        self.network.send("LEAV")
-        self.network.send("LIST")
-        self.stack.setCurrentWidget(self.room_list_widget)
-
-    def leave_game(self):
         self.network.send("LEAV")
         self.network.send("LIST")
         self.stack.setCurrentWidget(self.room_list_widget)
@@ -387,21 +373,18 @@ class MainWindow(QMainWindow):
         elif cmd == "LOBY":
             # LOBY <nick1> <nick2> ...
             players = tokens[1:]
-            self.lobby_widget.update_players(players)
-            if self.stack.currentWidget() != self.lobby_widget:
-                self.stack.setCurrentWidget(self.lobby_widget)
+            self.game_widget.lobby.update_players(players)
+            if self.stack.currentWidget() != self.game_widget:
+                self.stack.setCurrentWidget(self.game_widget)
                 
         elif cmd == "FULL":
             QMessageBox.warning(self, "Full", "Room is full!")
             
         elif cmd == "STRT":
-            # STRT OK
-            # Game starts, but we wait for state update to switch?
-            # Actually server sends STRT OK then broadcasts state.
+            # STRT OK or STRT FAIL
             pass
             
         elif cmd == "WAIT":
-            # Game paused/waiting
             # WAIT <nick1> <nick2> ...
             self.game_state.waiting_for = tokens[1:]
             self.game_widget.board.update()
@@ -421,6 +404,10 @@ class MainWindow(QMainWindow):
             self.game_widget.board.update()
             # Send TACK to acknowledge receipt
             self.network.send("TACK")
+        # elif cmd == "WINS":
+        #     self
+        # elif cmd == "DRAW":
+        #     pass
 
     def parse_game_state(self, tokens):
         try:
@@ -455,21 +442,22 @@ class MainWindow(QMainWindow):
                 body = [(hx, hy)]
                 curr = (hx, hy)
                 
-                # Directions in H... are from TAIL to HEAD (based on server logic)
-                # So to go backwards from HEAD, we subtract the direction
                 for char in dirs_str[1:]: # Skip 'H'
                     dx, dy = 0, 0
-                    if char == 'U': dx, dy = 0, 1
-                    elif char == 'D': dx, dy = 0, -1
+                    if char == 'U': dx, dy = 0, -1
+                    elif char == 'D': dx, dy = 0, 1
                     elif char == 'L': dx, dy = -1, 0
                     elif char == 'R': dx, dy = 1, 0
                     
-                    prev_x = curr[0] - dx
-                    prev_y = curr[1] - dy
+                    prev_x = curr[0] + dx
+                    prev_y = curr[1] + dy
                     body.append((prev_x, prev_y))
                     curr = (prev_x, prev_y)
-                    
-                self.game_state.players[nick] = {'body': body}
+
+                self.game_state.players[nick] = {
+                    'body': body, 
+                    'alive': True if dirs_str[0] == 'H' else False
+                    }
                 updated_players.add(nick)
 
             # Remove stale players

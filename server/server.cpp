@@ -225,13 +225,15 @@ std::string Game::full_state() {
                  std::to_string(player->body.front().x) + " " +
                  std::to_string(player->body.front().y) + " ";
 
-    state_str += "H"; // H for head if the player only has head so far;
+    state_str += player->alive
+                     ? "H"
+                     : "E"; // H for head if the player only has head so far;
     Position last_body_part = player->body.front();
     for (auto body_part : player->body) {
       if (last_body_part == body_part)
         continue;
       for (int dir = 0; dir < DIRECTION_COUNT; ++dir) {
-        if (dir_to_pos[dir] == last_body_part - body_part) {
+        if (dir_to_pos[dir] == body_part - last_body_part) {
           state_str += dir_to_string(static_cast<Direction>(dir));
           ;
         };
@@ -338,27 +340,13 @@ void Server::handle_game_tick() {
         game.print();
         std::cout << "-----" << std::endl;
       } else {
-        if (!std::count_if(game.players.begin(), game.players.end(),
-                           [](Player *player) { return player->alive; })) {
+        broadcast_game(game, "TICK " + game.full_state() + "|");
+        auto it = std::find_if(game.players.begin(), game.players.end(),
+                               [](Player *player) { return player->alive; });
+        if (it == game.players.end()) {
           broadcast_game(game, "DRAW|");
         } else {
-          for (Player *player : game.players) {
-
-            auto it =
-                std::find_if(this->connections.begin(), this->connections.end(),
-                             [player](const auto &pair) {
-                               return pair.second->player == player;
-                             });
-            if (it == this->connections.end())
-              continue;
-            if (player->alive) {
-              const char *win = "WINS|";
-              send(it->second->socket, win, strlen(win), 0);
-            } else {
-              const char *lose = "LOSE|";
-              send(it->second->socket, lose, strlen(lose), 0);
-            }
-          }
+            broadcast_game(game, "WINS " + (*it)->nickname + "|");
         }
         game.active = false;
       };
