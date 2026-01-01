@@ -24,7 +24,7 @@
 #define PLAYER_REMOVAL_TIMEOUT 15
 #define CONNECTION_TIMEOUT 10
 #define GLOBAL_TIMER_CHECK 1
-#define GAME_SPEED 2
+#define GAME_SPEED 1
 #define PING_INTERVAL 4
 #define MAX_PLAYERS_IN_ROOM 2
 
@@ -180,7 +180,6 @@ Position Game::random_empty_tile() {
 };
 
 int Game::hatch() {
-  std::cout << this->players.size() << " : " << this->active << std::endl;
   if (this->players.size() < 2 || this->active) {
     return 1;
   }
@@ -346,7 +345,7 @@ void Server::handle_game_tick() {
         if (it == game.players.end()) {
           broadcast_game(game, "DRAW|");
         } else {
-            broadcast_game(game, "WINS " + (*it)->nickname + "|");
+          broadcast_game(game, "WINS " + (*it)->nickname + "|");
         }
         game.active = false;
       };
@@ -364,13 +363,17 @@ void Server::handle_timer() {
   }
 
   // check for timeouts
+  std::vector<int> to_close;
   for (auto &pair : connections) {
     Connection &conn = *pair.second;
     if (std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - conn.last_active)
             .count() > CONNECTION_TIMEOUT) {
-      this->close_connection(conn.socket);
+      to_close.push_back(conn.socket);
     }
+  }
+  for (int fd : to_close) {
+    this->close_connection(fd);
   }
 
   // removing inactive players
@@ -493,14 +496,45 @@ int Server::process_message(Connection &conn, std::string msg) {
       return 1;
 
     std::string nick = tokens[1];
-    auto it = std::find_if(
+    auto new_conn_it = std::find_if(
         this->players.begin(), this->players.end(),
         [nick](const auto &player) { return player->nickname == nick; });
 
-    if (it == this->players.end()) {
+    if (new_conn_it == this->players.end()) {
       players.push_back(std::make_unique<Player>(tokens[1]));
       conn.player = players.back().get();
       break;
+    } else {
+      Player *player = new_conn_it->get();
+
+      // check if a connection with the player exists and close is if it does
+      auto old_conn_it = std::find_if(this->connections.begin(), this->connections.end(),
+                             [nick](const auto &c) {
+                               return c.second->player && c.second->player->nickname == nick;
+                             });
+      if (old_conn_it != this->connections.end()) {
+        this->close_connection(old_conn_it->second->socket);
+      }
+
+      conn.player = player;
+
+      for (auto &room : rooms) {
+        auto p_it = std::find(room.players.begin(), room.players.end(), player);
+        if (p_it != room.players.end()) {
+          std::string reply = "LOBY";
+          for (auto p : room.players) {
+            reply += " " + p->nickname;
+          }
+          reply += "|";
+          send(conn.socket, reply.c_str(), reply.size(), 0);
+
+          if (room.active) {
+            std::string tick = "TICK " + room.full_state() + "|";
+            send(conn.socket, tick.c_str(), tick.size(), 0);
+          }
+          break;
+        }
+      }
     }
 
     break;
@@ -667,7 +701,7 @@ int Server::add_fd_to_epoll(int sock) {
 
 void Server::close_connection(int sock_fd) {
   auto it = connections.find(sock_fd);
-  if (!it->first)
+  if (it == connections.end())
     return;
   std::cout << "Closing connection with: " << it->second->get_name()
             << std::endl;
@@ -788,6 +822,10 @@ int main(int argc, char **argv) {
   if (argc > 1) {
     port = std::stoi(argv[1]);
   }
-  Server server(port, "127.0.0.1");
+  std::string ip = "127.0.0.1";
+  if (argc > 2) {
+    ip = argv[2];
+  }
+  Server server(port, ip);
   server.serve();
 }

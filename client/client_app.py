@@ -11,8 +11,8 @@ from PyQt6.QtGui import QPainter, QColor, QBrush, QKeyEvent
 # --- Constants ---
 GRID_SIZE = 10
 DIRECTION_MAP = {
-    'U': (0, 1),
-    'D': (0, -1),
+    'U': (0, -1),
+    'D': (0, 1),
     'L': (-1, 0),
     'R': (1, 0)
 }
@@ -37,17 +37,30 @@ class NetworkWorker(QObject):
         super().__init__()
         self.socket = None
         self.running = False
+        self.last_msg_time = 0
+        self.timeout_timer = QTimer()
+        self.timeout_timer.timeout.connect(self.check_timeout)
 
     def connect_to_server(self, ip, port):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((ip, port))
             self.running = True
+            self.last_msg_time = time.time()
             threading.Thread(target=self.receive_loop, daemon=True).start()
+            
+            # Start timeout checker
+            self.timeout_timer.start(1000)
+            
             return True
         except Exception as e:
             self.error_occurred.emit(str(e))
             return False
+
+    def check_timeout(self):
+        if self.running and time.time() - self.last_msg_time > 10:  # 10 seconds timeout
+            self.error_occurred.emit("Server timeout")
+            self.disconnect()
 
     def send(self, msg):
         if self.socket:
@@ -59,6 +72,7 @@ class NetworkWorker(QObject):
 
     def disconnect(self):
         self.running = False
+        self.timeout_timer.stop()
         if self.socket:
             try:
                 self.socket.close()
@@ -76,6 +90,7 @@ class NetworkWorker(QObject):
                     self.disconnect()
                     break
                 
+                self.last_msg_time = time.time()
                 buffer += data.decode(errors='replace')
                 
                 while '|' in buffer:
@@ -226,7 +241,6 @@ class GameBoard(QWidget):
         
         # Draw Apple
         ax, ay = self.game_state.apple
-        ay = ay
         
         painter.setBrush(QBrush(QColor('red')))
         painter.drawEllipse(int(ax * cell_w), int(ay * cell_h), int(cell_w), int(cell_h))
@@ -353,11 +367,34 @@ class MainWindow(QMainWindow):
             self._last_move = direction
 
     def handle_disconnect(self):
-        QMessageBox.critical(self, "Disconnected", "Connection lost.")
-        self.stack.setCurrentWidget(self.login_widget)
+        # Try to reconnect if we were in a game or lobby
+        if self.stack.currentWidget() != self.login_widget:
+            print("Connection lost, attempting to reconnect...")
+            # Simple reconnect logic: try to connect again with same credentials
+            QTimer.singleShot(2000, self.attempt_reconnect)
+        else:
+            QMessageBox.critical(self, "Disconnected", "Connection lost.")
+            self.stack.setCurrentWidget(self.login_widget)
+
+    def attempt_reconnect(self):
+        nick = self.game_state.my_nick
+        ip = self.login_widget.ip_input.text()
+        try:
+            port = int(self.login_widget.port_input.text())
+        except:
+            port = 8888
+            
+        if self.network.connect_to_server(ip, port):
+            print("Reconnected!")
+            self.network.send(f"NICK {nick}")
+            # If we were in a game, we might want to rejoin or just list rooms
+            # The server should handle re-associating the player if the nick matches
+        else:
+            print("Reconnect failed, retrying...")
+            QTimer.singleShot(2000, self.attempt_reconnect)
 
     def handle_error(self, msg):
-        print(f"Error: {msg}")
+        QMessageBox.warning(self, "Error", msg)
 
     def handle_message(self, msg):
         print(f"RX: {msg}")
@@ -454,11 +491,7 @@ class MainWindow(QMainWindow):
                 curr = (hx, hy)
                 
                 for char in dirs_str[1:]: # Skip 'H'
-                    dx, dy = 0, 0
-                    if char == 'U': dx, dy = 0, -1
-                    elif char == 'D': dx, dy = 0, 1
-                    elif char == 'L': dx, dy = -1, 0
-                    elif char == 'R': dx, dy = 1, 0
+                    dx, dy = DIRECTION_MAP[char]
                     
                     prev_x = curr[0] + dx
                     prev_y = curr[1] + dy
