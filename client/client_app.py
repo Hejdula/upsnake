@@ -26,6 +26,7 @@ class GameState:
         self.my_nick = ""
         self.grid_size = GRID_SIZE
         self.waiting_for = [] # List of nicks server is waiting for
+        self.last_game_result = ""
 
 class NetworkWorker(QObject):
     msg_received = pyqtSignal(str)
@@ -249,12 +250,19 @@ class GameBoard(QWidget):
                 for i, (bx, by) in enumerate(data['body']):
                     painter.drawRect(int(bx * cell_w), int(by * cell_h), int(cell_w), int(cell_h))
 
+        
+        # last game result and waiting for label
+        painter.setPen(QColor('yellow'))
+        font = painter.font()
+        font.setPointSize(24)
+        font.setBold(True)
+        painter.setFont(font)
 
-        # Draw Waiting Status
-        if self.game_state.waiting_for:
-            painter.setPen(QColor('yellow'))
+        if self.game_state.last_game_result:
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.game_state.last_game_result)
+        elif self.game_state.waiting_for:
             text = "Waiting for: " + ", ".join(self.game_state.waiting_for)
-            painter.drawText(10, h - 10, text)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
 class GameWidget(QWidget):
     move_request = pyqtSignal(str)
@@ -287,7 +295,7 @@ class GameWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Snake Client")
+        self.setWindowTitle("Snake")
         self.resize(600, 600)
         
         self.network = NetworkWorker()
@@ -306,10 +314,6 @@ class MainWindow(QMainWindow):
         self.room_list_widget.join_room.connect(self.join_room)
         self.room_list_widget.refresh_request.connect(self.refresh_rooms)
         
-        # self.lobby_widget = LobbyWidget()
-        # self.lobby_widget.start_game.connect(self.start_game)
-        # self.lobby_widget.leave_room.connect(self.leave_room)
-        
         self.game_widget = GameWidget(self.game_state)
         self.game_widget.lobby.start_game.connect(self.start_game)
         self.game_widget.lobby.leave_room.connect(self.leave_room)
@@ -321,12 +325,13 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(self.stack)
 
+        self._last_move = None
+
     def connect_to_server(self, nick, ip, port):
         self.game_state.my_nick = nick
         if self.network.connect_to_server(ip, port):
             self.network.send(f"NICK {nick}")
             self.network.send("LIST")
-            # We don't switch view yet, wait for ROOM response
 
     def refresh_rooms(self):
         self.network.send("LIST")
@@ -343,7 +348,9 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.room_list_widget)
 
     def send_move(self, direction):
-        self.network.send(f"MOVE {direction}")
+        if direction != self._last_move:
+            self.network.send(f"MOVE {direction}")
+            self._last_move = direction
 
     def handle_disconnect(self):
         QMessageBox.critical(self, "Disconnected", "Connection lost.")
@@ -396,6 +403,7 @@ class MainWindow(QMainWindow):
         # Game State Handling
         # Check if it's a game state message (starts with TICK)
         elif cmd == "TICK":
+            self.game_state.last_game_result = ""
             self.game_state.waiting_for = [] # Clear waiting status on new tick
             self.parse_game_state(tokens[1:]) # Skip TICK token
             if self.stack.currentWidget() != self.game_widget:
@@ -404,10 +412,13 @@ class MainWindow(QMainWindow):
             self.game_widget.board.update()
             # Send TACK to acknowledge receipt
             self.network.send("TACK")
-        # elif cmd == "WINS":
-        #     self
-        # elif cmd == "DRAW":
-        #     pass
+        elif cmd == "WINS":
+            self.game_state.last_game_result = "Player " + tokens[1] + " won!"
+            self.game_widget.board.update()
+        elif cmd == "DRAW":
+            self.game_state.last_game_result = "Draw!"
+            self.game_widget.board.update()
+            pass
 
     def parse_game_state(self, tokens):
         try:
