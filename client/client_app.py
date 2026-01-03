@@ -8,7 +8,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QPainter, QColor, QBrush, QKeyEvent
 
-# --- Constants ---
+SERVER_TIMEOUT_SEC = 5
+DISCONNECT_TIMEOUT_SEC = 10
+TIMEOUT_CHECK_MILIS = 1000
 GRID_SIZE = 10
 DIRECTION_MAP = {
     'U': (0, -1),
@@ -16,8 +18,6 @@ DIRECTION_MAP = {
     'L': (-1, 0),
     'R': (1, 0)
 }
-# Mapping from integer dir (server) to string char
-INT_TO_DIR = ['U', 'D', 'L', 'R']
 
 class GameState:
     def __init__(self):
@@ -31,15 +31,18 @@ class GameState:
 class NetworkWorker(QObject):
     msg_received = pyqtSignal(str)
     disconnected = pyqtSignal()
+    reconnect = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.socket = None
         self.running = False
+        self.should_reconnect = True
         self.last_msg_time = 0
         self.timeout_timer = QTimer()
         self.timeout_timer.timeout.connect(self.check_timeout)
+        self.timeout_timer.start(1000)
 
     def connect_to_server(self, ip, port):
         try:
@@ -49,16 +52,13 @@ class NetworkWorker(QObject):
             self.last_msg_time = time.time()
             threading.Thread(target=self.receive_loop, daemon=True).start()
             
-            # Start timeout checker
-            self.timeout_timer.start(1000)
-            
             return True
         except Exception as e:
             self.error_occurred.emit(str(e))
             return False
 
     def check_timeout(self):
-        if self.running and time.time() - self.last_msg_time > 10:  # 10 seconds timeout
+        if self.running and time.time() - self.last_msg_time > SERVER_TIMEOUT_SEC:
             self.error_occurred.emit("Server timeout")
             self.disconnect()
 
@@ -72,14 +72,16 @@ class NetworkWorker(QObject):
 
     def disconnect(self):
         self.running = False
-        self.timeout_timer.stop()
         if self.socket:
             try:
                 self.socket.close()
             except:
                 pass
             self.socket = None
-        self.disconnected.emit()
+        if self.should_reconnect:
+            self.reconnect.emit()
+        else:
+            self.disconnected.emit()
 
     def receive_loop(self):
         buffer = ""
@@ -87,6 +89,7 @@ class NetworkWorker(QObject):
             try:
                 data = self.socket.recv(4096)
                 if not data:
+                    self.should_reconnect = False
                     self.disconnect()
                     break
                 
@@ -134,14 +137,22 @@ class LoginWidget(QWidget):
     def on_connect(self):
         nick = self.nick_input.text()
         ip = self.ip_input.text()
-        try:
-            port = int(self.port_input.text())
-        except ValueError:
-            QMessageBox.warning(self, "Error", "Port must be a number")
-            return
-            
+
         if not nick:
             QMessageBox.warning(self, "Error", "Nickname is required")
+            return
+
+        try:
+            port = int(self.port_input.text())
+            if not (1 <= port <= 65535):
+                raise ValueError()
+            socket.inet_aton(ip)
+
+        except ValueError:
+            QMessageBox.warning(self, "Error", "Port must be a number between 1 and 65535")
+            return
+        except socket.error:
+            QMessageBox.warning(self, "Error", "Invalid IP address")
             return
             
         self.login_request.emit(nick, ip, port)
@@ -149,6 +160,7 @@ class LoginWidget(QWidget):
 class RoomListWidget(QWidget):
     join_room = pyqtSignal(int)
     refresh_request = pyqtSignal()
+    quit = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -160,11 +172,15 @@ class RoomListWidget(QWidget):
         
         self.join_btn = QPushButton("Join Selected Room")
         self.join_btn.clicked.connect(self.on_join)
+
+        self.quit_btn = QPushButton("Disconnect")
+        self.quit_btn.clicked.connect(self.quit.emit)
         
         layout.addWidget(QLabel("Available Rooms"))
         layout.addWidget(self.list_widget)
-        layout.addWidget(self.refresh_btn)
         layout.addWidget(self.join_btn)
+        layout.addWidget(self.refresh_btn)
+        layout.addWidget(self.quit_btn)
         
         self.setLayout(layout)
 
@@ -315,6 +331,7 @@ class MainWindow(QMainWindow):
         self.network = NetworkWorker()
         self.network.msg_received.connect(self.handle_message)
         self.network.disconnected.connect(self.handle_disconnect)
+        self.network.reconnect.connect(self.attempt_reconnect)
         self.network.error_occurred.connect(self.handle_error)
         
         self.game_state = GameState()
@@ -327,6 +344,7 @@ class MainWindow(QMainWindow):
         self.room_list_widget = RoomListWidget()
         self.room_list_widget.join_room.connect(self.join_room)
         self.room_list_widget.refresh_request.connect(self.refresh_rooms)
+        self.room_list_widget.quit.connect(self.disconnect_from_server)
         
         self.game_widget = GameWidget(self.game_state)
         self.game_widget.lobby.start_game.connect(self.start_game)
@@ -350,6 +368,7 @@ class MainWindow(QMainWindow):
     def refresh_rooms(self):
         self.network.send("LIST")
 
+
     def join_room(self, room_id):
         self.network.send(f"JOIN {room_id}")
 
@@ -360,21 +379,19 @@ class MainWindow(QMainWindow):
         self.network.send("LEAV")
         self.network.send("LIST")
         self.stack.setCurrentWidget(self.room_list_widget)
-
+    
     def send_move(self, direction):
         if direction != self._last_move:
             self.network.send(f"MOVE {direction}")
             self._last_move = direction
 
+    def disconnect_from_server(self):
+        self.network.should_reconnect = False
+        self.network.disconnect()
+
     def handle_disconnect(self):
-        # Try to reconnect if we were in a game or lobby
-        if self.stack.currentWidget() != self.login_widget:
-            print("Connection lost, attempting to reconnect...")
-            # Simple reconnect logic: try to connect again with same credentials
-            QTimer.singleShot(2000, self.attempt_reconnect)
-        else:
-            QMessageBox.critical(self, "Disconnected", "Connection lost.")
-            self.stack.setCurrentWidget(self.login_widget)
+        self.stack.setCurrentWidget(self.login_widget)
+        QMessageBox.information(self, "Disconnect", "Disconnected from server")
 
     def attempt_reconnect(self):
         nick = self.game_state.my_nick
@@ -387,8 +404,6 @@ class MainWindow(QMainWindow):
         if self.network.connect_to_server(ip, port):
             print("Reconnected!")
             self.network.send(f"NICK {nick}")
-            # If we were in a game, we might want to rejoin or just list rooms
-            # The server should handle re-associating the player if the nick matches
         else:
             print("Reconnect failed, retrying...")
             QTimer.singleShot(2000, self.attempt_reconnect)
@@ -397,7 +412,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Error", msg)
 
     def handle_message(self, msg):
-        print(f"RX: {msg}")
+        print(f"IN: {msg}")
         tokens = msg.split()
         if not tokens:
             return
@@ -411,21 +426,20 @@ class MainWindow(QMainWindow):
             # ROOM <size1> <size2> ...
             sizes = tokens[1:]
             self.room_list_widget.update_rooms(sizes)
-            if self.stack.currentWidget() == self.login_widget:
-                self.stack.setCurrentWidget(self.room_list_widget)
+            self.stack.setCurrentWidget(self.room_list_widget)
                 
         elif cmd == "LOBY":
             # LOBY <nick1> <nick2> ...
             players = tokens[1:]
             self.game_widget.lobby.update_players(players)
-            if self.stack.currentWidget() != self.game_widget:
-                self.stack.setCurrentWidget(self.game_widget)
+            self.stack.setCurrentWidget(self.game_widget)
                 
         elif cmd == "FULL":
-            QMessageBox.warning(self, "Full", "Room is full!")
+            QMessageBox.information(self, "Could not join", "Room is full!")
             
         elif cmd == "STRT":
-            # STRT OK or STRT FAIL
+            if tokens[1] == "FAIL":
+                QMessageBox.information(self, "Could not start", "Game active or not enough players")
             pass
             
         elif cmd == "WAIT":
@@ -437,12 +451,10 @@ class MainWindow(QMainWindow):
             # We left the room
             pass
             
-        # Game State Handling
-        # Check if it's a game state message (starts with TICK)
         elif cmd == "TICK":
             self.game_state.last_game_result = ""
             self.game_state.waiting_for = [] # Clear waiting status on new tick
-            self.parse_game_state(tokens[1:]) # Skip TICK token
+            self.parse_game_state(tokens[1:])
             if self.stack.currentWidget() != self.game_widget:
                 self.stack.setCurrentWidget(self.game_widget)
                 self.game_widget.setFocus() # Ensure keyboard focus
