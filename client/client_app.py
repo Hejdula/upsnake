@@ -97,7 +97,6 @@ class NetworkWorker(QObject):
             try:
                 data = self.socket.recv(4096)
                 if not data:
-                    self.should_reconnect = False
                     self.disconnect()
                     break
                 
