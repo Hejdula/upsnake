@@ -9,7 +9,9 @@ from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QPainter, QColor, QBrush, QKeyEvent
 
 SERVER_TIMEOUT_SEC = 5
-DISCONNECT_TIMEOUT_SEC = 10
+DISCONNECT_TIMEOUT_SEC = 9
+RECONNECT_ATTEMPTS = 3
+RECONNECT_RETRY_DELAY = 2
 TIMEOUT_CHECK_MILIS = 1000
 GRID_SIZE = 10
 DIRECTION_MAP = {
@@ -33,6 +35,8 @@ class NetworkWorker(QObject):
     disconnected = pyqtSignal()
     reconnect = pyqtSignal()
     error_occurred = pyqtSignal(str)
+    connection_unstable = pyqtSignal()
+    connection_recovered = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -58,9 +62,13 @@ class NetworkWorker(QObject):
             return False
 
     def check_timeout(self):
-        if self.running and time.time() - self.last_msg_time > SERVER_TIMEOUT_SEC:
-            self.error_occurred.emit("Server timeout")
-            self.disconnect()
+        if self.running:
+            delta = time.time() - self.last_msg_time
+            if delta > DISCONNECT_TIMEOUT_SEC:
+                self.error_occurred.emit("Connection lost (Timeout)")
+                self.disconnect()
+            elif delta > SERVER_TIMEOUT_SEC:
+                self.connection_unstable.emit()
 
     def send(self, msg):
         if self.socket:
@@ -94,6 +102,7 @@ class NetworkWorker(QObject):
                     break
                 
                 self.last_msg_time = time.time()
+                self.connection_recovered.emit()
                 buffer += data.decode(errors='replace')
                 
                 while '|' in buffer:
@@ -105,6 +114,40 @@ class NetworkWorker(QObject):
                     self.error_occurred.emit(str(e))
                     self.disconnect()
                 break
+
+class InternetIssuesWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout()
+        label = QLabel("Internet Issues...\nWaiting for server...")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = label.font()
+        font.setPointSize(16)
+        label.setFont(font)
+        layout.addWidget(label)
+        self.setLayout(layout)
+
+class ReconnectWidget(QWidget):
+    cancel_reconnect = pyqtSignal()
+    
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout()
+        self.status_label = QLabel("Connection lost.\nReconnecting...")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = self.status_label.font()
+        font.setPointSize(16)
+        self.status_label.setFont(font)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.cancel_reconnect.emit)
+        
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.cancel_btn)
+        self.setLayout(layout)
+        
+    def update_status(self, attempt, max_attempts):
+        self.status_label.setText(f"Connection lost.\nReconnecting... ({attempt}/{max_attempts})")
 
 class LoginWidget(QWidget):
     login_request = pyqtSignal(str, str, int) # nick, ip, port
@@ -333,6 +376,8 @@ class MainWindow(QMainWindow):
         self.network.disconnected.connect(self.handle_disconnect)
         self.network.reconnect.connect(self.attempt_reconnect)
         self.network.error_occurred.connect(self.handle_error)
+        self.network.connection_unstable.connect(self.handle_unstable)
+        self.network.connection_recovered.connect(self.handle_recovered)
         
         self.game_state = GameState()
         
@@ -351,19 +396,26 @@ class MainWindow(QMainWindow):
         self.game_widget.lobby.leave_room.connect(self.leave_room)
         self.game_widget.move_request.connect(self.send_move)
         
+        self.internet_issues_widget = InternetIssuesWidget()
+        self.reconnect_widget = ReconnectWidget()
+        self.reconnect_widget.cancel_reconnect.connect(self.cancel_reconnect)
+        
         self.stack.addWidget(self.login_widget)
         self.stack.addWidget(self.room_list_widget)
         self.stack.addWidget(self.game_widget)
+        self.stack.addWidget(self.internet_issues_widget)
+        self.stack.addWidget(self.reconnect_widget)
         
         self.setCentralWidget(self.stack)
 
         self._last_move = None
+        self.reconnect_attempt = 0
+        self.last_active_widget = self.login_widget
 
     def connect_to_server(self, nick, ip, port):
         self.game_state.my_nick = nick
         if self.network.connect_to_server(ip, port):
             self.network.send(f"NICK {nick}")
-            self.network.send("LIST")
 
     def refresh_rooms(self):
         self.network.send("LIST")
@@ -393,7 +445,33 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.login_widget)
         QMessageBox.information(self, "Disconnect", "Disconnected from server")
 
+    def handle_unstable(self):
+        if self.stack.currentWidget() != self.internet_issues_widget and self.stack.currentWidget() != self.reconnect_widget:
+            self.last_active_widget = self.stack.currentWidget()
+            self.stack.setCurrentWidget(self.internet_issues_widget)
+            
+    def handle_recovered(self):
+        if self.stack.currentWidget() == self.internet_issues_widget:
+            self.stack.setCurrentWidget(self.last_active_widget)
+
+    def cancel_reconnect(self):
+        self.network.should_reconnect = False
+        self.network.disconnect()
+        self.handle_disconnect()
+
     def attempt_reconnect(self):
+        self.stack.setCurrentWidget(self.reconnect_widget)
+        
+        if self.reconnect_attempt >= RECONNECT_ATTEMPTS:
+            self.network.should_reconnect = False
+            self.handle_disconnect()
+            QMessageBox.warning(self, "Error", "Could not reconnect to server.")
+            self.reconnect_attempt = 0
+            return
+
+        self.reconnect_attempt += 1
+        self.reconnect_widget.update_status(self.reconnect_attempt, RECONNECT_ATTEMPTS)
+        
         nick = self.game_state.my_nick
         ip = self.login_widget.ip_input.text()
         try:
@@ -404,14 +482,21 @@ class MainWindow(QMainWindow):
         if self.network.connect_to_server(ip, port):
             print("Reconnected!")
             self.network.send(f"NICK {nick}")
+            self.reconnect_attempt = 0
+            if self.last_active_widget == self.room_list_widget:
+                self.network.send("LIST")
         else:
             print("Reconnect failed, retrying...")
-            QTimer.singleShot(2000, self.attempt_reconnect)
+            QTimer.singleShot(RECONNECT_RETRY_DELAY * 1000, self.attempt_reconnect)
 
     def handle_error(self, msg):
-        QMessageBox.warning(self, "Error", msg)
+        if self.stack.currentWidget() != self.reconnect_widget and msg != "Connection lost (Timeout)":
+            QMessageBox.warning(self, "Error", msg)
 
     def handle_message(self, msg):
+        if self.stack.currentWidget() == self.internet_issues_widget:
+             self.stack.setCurrentWidget(self.last_active_widget)
+
         print(f"IN: {msg}")
         tokens = msg.split()
         if not tokens:
