@@ -193,6 +193,14 @@ class LoginWidget(QWidget):
             QMessageBox.warning(self, "Error", "Nickname is required")
             return
 
+        if any(c.isspace() for c in nick):
+            QMessageBox.warning(self, "Error", "Nickname cannot contain whitespaces")
+            return
+
+        if '|' in nick:
+            QMessageBox.warning(self, "Error", "Nickname cannot contain '|'")
+            return
+
         try:
             port = int(self.port_input.text())
             if not (1 <= port <= 65535):
@@ -574,8 +582,10 @@ class MainWindow(QMainWindow):
         elif cmd == "DRAW":
             self.game_state.last_game_result = "Draw!"
             self.game_widget.board.update()
+        elif cmd == "MOVD":
+            pass
         else: 
-            QMessageBox.warning(self, "Invalid format", "Invalid message from server, closing connection")
+            QMessageBox.warning(self, "Invalid format", "Invalid message from server" + msg + ", closing connection")
             self.disconnect_from_server()
 
     def parse_game_state(self, tokens):

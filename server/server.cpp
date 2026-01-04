@@ -25,9 +25,9 @@
 #define PLAYER_REMOVAL_TIMEOUT 60
 #define CONNECTION_TIMEOUT 10
 #define GLOBAL_TIMER_CHECK 1
-#define GAME_SPEED 4
+#define GAME_SPEED 1
 #define PING_INTERVAL 2
-#define MAX_PLAYERS_IN_ROOM 2
+#define MAX_PLAYERS_IN_ROOM 4
 
 void Game::print() {
   // ANSI color codes for up to 6 players
@@ -327,13 +327,15 @@ void Server::handle_game_tick() {
           msg += " " + player->nickname;
         }
         msg += "|";
-        
+
         // Only send WAIT to players who have updated
         for (Player *player : game.players) {
           if (player->updated) {
-            auto it = std::find_if(
-                this->connections.begin(), this->connections.end(),
-                [player](const auto &pair) { return pair.second->player == player; });
+            auto it =
+                std::find_if(this->connections.begin(), this->connections.end(),
+                             [player](const auto &pair) {
+                               return pair.second->player == player;
+                             });
             if (it != this->connections.end()) {
               send(it->second->socket, msg.c_str(), msg.size(), 0);
             }
@@ -405,7 +407,12 @@ void Server::handle_timer() {
         auto it = std::find(room.players.begin(), room.players.end(), p);
         if (it != room.players.end()) {
           room.players.erase(it);
-          // TODO! room.broadcast();
+          std::string update_msg = "LOBY";
+          for (auto player : room.players) {
+            update_msg += " " + player->nickname;
+          }
+          update_msg += "|";
+          broadcast_game(room, update_msg);
         }
       }
       auto it = std::find_if(
@@ -508,11 +515,11 @@ int Server::process_message(Connection &conn, std::string msg) {
       return 1;
 
     std::string nick = tokens[1];
-    auto new_conn_it = std::find_if(
+    auto new_conn_player_it = std::find_if(
         this->players.begin(), this->players.end(),
         [nick](const auto &player) { return player->nickname == nick; });
 
-    if (new_conn_it == this->players.end()) {
+    if (new_conn_player_it == this->players.end()) {
       players.push_back(std::make_unique<Player>(tokens[1]));
       conn.player = players.back().get();
 
@@ -523,7 +530,7 @@ int Server::process_message(Connection &conn, std::string msg) {
       reply += "|";
       send(conn.socket, reply.c_str(), reply.size(), 0);
     } else {
-      Player *player = new_conn_it->get();
+      Player *player = new_conn_player_it->get();
 
       // check if a connection with the player exists and close is if it does
       auto old_conn_it = std::find_if(
@@ -536,10 +543,11 @@ int Server::process_message(Connection &conn, std::string msg) {
       }
 
       conn.player = player;
-
+      bool player_in_lobby = false;
       for (auto &room : rooms) {
         auto p_it = std::find(room.players.begin(), room.players.end(), player);
         if (p_it != room.players.end()) {
+          player_in_lobby = true;
           std::string reply = "LOBY";
           for (auto p : room.players) {
             reply += " " + p->nickname;
@@ -552,6 +560,15 @@ int Server::process_message(Connection &conn, std::string msg) {
             send(conn.socket, tick.c_str(), tick.size(), 0);
           }
         }
+      }
+
+      if (!player_in_lobby) {
+        std::string reply = "ROOM";
+        for (const auto &room : rooms) {
+          reply += " " + std::to_string(room.players.size());
+        }
+        reply += "|";
+        send(conn.socket, reply.c_str(), reply.size(), 0);
       }
     }
     break;
