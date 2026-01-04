@@ -432,9 +432,9 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.room_list_widget)
     
     def send_move(self, direction):
-        if direction != self._last_move:
-            self.network.send(f"MOVE {direction}")
-            self._last_move = direction
+        # if direction != self._last_move:
+        self.network.send(f"MOVE {direction}")
+            # self._last_move = direction
 
     def disconnect_from_server(self):
         self.network.should_reconnect = False
