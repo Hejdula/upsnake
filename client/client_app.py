@@ -53,6 +53,7 @@ class NetworkWorker(QObject):
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((ip, port))
             self.running = True
+            self.should_reconnect = True
             self.last_msg_time = time.time()
             threading.Thread(target=self.receive_loop, daemon=True).start()
             
@@ -74,6 +75,8 @@ class NetworkWorker(QObject):
         if self.socket:
             try:
                 self.socket.sendall((msg + "|").encode())
+            except OSError:
+                self.disconnect()
             except Exception as e:
                 self.error_occurred.emit(str(e))
                 self.disconnect()
@@ -93,7 +96,7 @@ class NetworkWorker(QObject):
 
     def receive_loop(self):
         buffer = ""
-        while self.running and self.socket:
+        while self.socket and self.running:
             try:
                 data = self.socket.recv(4096)
                 if not data:
@@ -108,6 +111,10 @@ class NetworkWorker(QObject):
                     message, buffer = buffer.split('|', 1)
                     if message:
                         self.msg_received.emit(message)
+            except OSError:
+                if self.running:
+                    self.disconnect()
+                break
             except Exception as e:
                 if self.running:
                     self.error_occurred.emit(str(e))
@@ -442,7 +449,7 @@ class MainWindow(QMainWindow):
 
     def handle_disconnect(self):
         self.stack.setCurrentWidget(self.login_widget)
-        QMessageBox.information(self, "Disconnect", "Disconnected from server")
+        QMessageBox.information(self, "Disconnect", "Disconnnected from server")
 
     def handle_unstable(self):
         if self.stack.currentWidget() != self.internet_issues_widget and self.stack.currentWidget() != self.reconnect_widget:
@@ -489,7 +496,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(RECONNECT_RETRY_DELAY * 1000, self.attempt_reconnect)
 
     def handle_error(self, msg):
-        if self.stack.currentWidget() != self.reconnect_widget and msg != "Connection lost (Timeout)":
+        if self.stack.currentWidget() != self.reconnect_widget:
             QMessageBox.warning(self, "Error", msg)
 
     def handle_message(self, msg):
