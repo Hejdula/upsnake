@@ -100,17 +100,25 @@ class NetworkWorker(QObject):
         buffer = ""
         while self.socket and self.running:
             try:
-                data = self.socket.recv(4096)
+                data = self.socket.recv(128)
                 if not data:
                     self.disconnect()
-                    break
-                
-                self.last_msg_time = time.time()
-                self.connection_recovered.emit()
+                    return
                 buffer += data.decode(errors='replace')
+                if len(buffer) < 4:
+                    continue
+                
+                if buffer[:4] not in {
+                    "MOVD", "ROOM", "LOBY", "TICK", 
+                    "FULL", "LEFT", "STRT", "PING", 
+                    "WINS", "DRAW", "WAIT"}:
+                    self.disconnect()
+                    return
                 
                 while '|' in buffer:
                     message, buffer = buffer.split('|', 1)
+                    self.last_msg_time = time.time()
+                    self.connection_recovered.emit()
                     if message:
                         self.msg_received.emit(message)
             except OSError:
@@ -585,7 +593,7 @@ class MainWindow(QMainWindow):
         elif cmd == "MOVD":
             pass
         else: 
-            QMessageBox.warning(self, "Invalid format", "Invalid message from server" + msg + ", closing connection")
+            QMessageBox.warning(self, "Invalid format", "Invalid message from server, closing connection")
             self.disconnect_from_server()
 
     def parse_game_state(self, tokens):

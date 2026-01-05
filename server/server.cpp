@@ -460,6 +460,12 @@ void Server::handle_socket_read(int sock_fd) {
   // log
   std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
 
+  if (conn.buff.size() < 4)
+    return;
+  if (get_msg_type(conn.buff.substr(0, 4)) == INVALID) {
+    close_connection(conn.socket);
+  }
+
   size_t separator = conn.buff.find('|');
 
   // process whole messages
