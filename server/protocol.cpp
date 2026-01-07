@@ -5,7 +5,8 @@
 std::unordered_map<std::string, msg_type> msg_type_map = {
     {"PONG", PONG}, {"NICK", NICK},   {"LEAV", LEAVE},
     {"MOVE", MOVE}, {"STRT", START}, {"QUIT", QUIT},
-    {"LIST", LIST_ROOMS}, {"JOIN", JOIN}, {"TACK", TACK}
+    {"LIST", LIST_ROOMS}, {"JOIN", JOIN}, {"TACK", TACK},
+    {"ZZZZ", WAITING}, {"SSSS", OK}
 };
 
 msg_type get_msg_type(std::string key_token) {

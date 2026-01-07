@@ -515,6 +515,11 @@ int Server::process_message(Connection &conn, std::string msg) {
     return 1;
 
   switch (type) {
+  case OK:
+  case WAITING:
+  case PONG:
+    // so far only to reset last_msg time
+    break;
   case NICK: {
 
     if (tokens.size() != 2)
@@ -590,8 +595,7 @@ int Server::process_message(Connection &conn, std::string msg) {
     }
     reply += "|";
     send(conn.socket, reply.c_str(), reply.size(), 0);
-    break;
-  }
+  } break;
   case JOIN: {
     if (tokens.size() != 2)
       return 1;
@@ -628,13 +632,12 @@ int Server::process_message(Connection &conn, std::string msg) {
     }
     reply += "|";
     broadcast_game(rooms[room_id], reply);
-    break;
-  }
-  case INVALID:
+  } break;
+  case INVALID: {
     std::cout << "invalid message: [" << msg << "] from " << conn.get_name()
               << std::endl;
     // return 1;
-    break;
+  } break;
   case LEAVE: {
     if (tokens.size() != 1)
       return 1;
@@ -655,10 +658,7 @@ int Server::process_message(Connection &conn, std::string msg) {
     }
     const char *reply = "LEFT|";
     send(conn.socket, reply, strlen(reply), 0);
-    break;
-  }
-  case PONG:
-    break;
+  } break;
   case MOVE: {
     if (tokens.size() != 2 || tokens[1].size() != 1)
       return 1;
@@ -714,12 +714,12 @@ int Server::process_message(Connection &conn, std::string msg) {
     const char *reply = "STRT OK|";
     send(conn.socket, reply, strlen(reply), 0);
     broadcast_game(*game, "TICK " + game->full_state() + "|");
-    break;
-  }
+  } break;
   case TACK: {
     conn.player->updated = true;
   } break;
-  case QUIT:
+  case QUIT: {
+
     if (tokens.size() != 1)
       return 1;
 
@@ -749,7 +749,7 @@ int Server::process_message(Connection &conn, std::string msg) {
 
     this->close_connection(conn.socket);
 
-    break;
+  } break;
   }
   return 0;
 }

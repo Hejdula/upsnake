@@ -12,7 +12,9 @@ enum msg_type {
   QUIT,
   LIST_ROOMS,
   JOIN,
-  TACK
+  TACK,
+  WAITING,
+  OK,
 };
 
 msg_type get_msg_type(std::string key_token);

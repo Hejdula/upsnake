@@ -1,5 +1,4 @@
 notes
-client_ref
-server_ref
 .vscode/settings.json
 server/intcptor_config.cfg
+client/fuzz_server.py

@@ -569,11 +569,12 @@ class MainWindow(QMainWindow):
             # WAIT <nick1> <nick2> ...
             self.game_state.waiting_for = tokens[1:]
             self.game_widget.board.update()
+            self.network.send("ZZZZ")
             
         elif cmd == "LEFT":
             # We left the room
             pass
-            
+
         elif cmd == "TICK":
             self.game_state.last_game_result = ""
             self.game_state.waiting_for = [] # Clear waiting status on new tick
@@ -584,12 +585,17 @@ class MainWindow(QMainWindow):
             self.game_widget.board.update()
             # Send TACK to acknowledge receipt
             self.network.send("TACK")
+
         elif cmd == "WINS":
             self.game_state.last_game_result = "Player " + tokens[1] + " won!"
             self.game_widget.board.update()
+            self.network.send("SSSS")
+
         elif cmd == "DRAW":
             self.game_state.last_game_result = "Draw!"
             self.game_widget.board.update()
+            self.network.send("SSSS")
+
         elif cmd == "MOVD":
             pass
         else: 
