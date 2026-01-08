@@ -550,7 +550,7 @@ int Server::process_message(Connection &conn, std::string msg) {
           [nick](const auto &c) {
             return c.second->player && c.second->player->nickname == nick;
           });
-      if (old_conn_it != this->connections.end()) {
+      if (old_conn_it != this->connections.end() && old_conn_it->second->socket != conn.socket) {
         this->close_connection(old_conn_it->second->socket);
       }
 
