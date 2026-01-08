@@ -523,8 +523,9 @@ int Server::process_message(Connection &conn, std::string msg) {
     break;
   case NICK: {
 
-    if (tokens.size() != 2)
+    if (tokens.size() != 2 || conn.player)
       return 1;
+
 
     std::string nick = tokens[1];
     auto new_conn_player_it = std::find_if(
@@ -550,7 +551,8 @@ int Server::process_message(Connection &conn, std::string msg) {
           [nick](const auto &c) {
             return c.second->player && c.second->player->nickname == nick;
           });
-      if (old_conn_it != this->connections.end() && old_conn_it->second->socket != conn.socket) {
+       
+      if (old_conn_it != this->connections.end()) {
         this->close_connection(old_conn_it->second->socket);
       }
 
