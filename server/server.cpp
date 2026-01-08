@@ -458,7 +458,7 @@ void Server::handle_socket_read(int sock_fd) {
   conn.buff.append(buff);
 
   // log
-  std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
+  // std::cout << "[" << conn.get_name() << "] : " << buff << std::endl;
 
   if (conn.buff.size() < 4)
     return;
@@ -502,6 +502,7 @@ std::vector<std::string> split(const char *str, char c = ' ') {
 }
 
 int Server::process_message(Connection &conn, std::string msg) {
+  std::cout << "[" << conn.get_name() << "] : " << msg << std::endl;
   // std::cout << "rocessing message:" << msg << std::endl;
   auto tokens = split(msg.data(), ' ');
   // for (const auto &token : tokens) {

@@ -23,6 +23,7 @@ DIRECTION_MAP = {
 
 class GameState:
     def __init__(self):
+        self.last_move = ""
         self.apple = (0, 0)
         self.players = {} # nick -> {'body': [(x,y), ...], 'alive': bool}
         self.my_nick = ""
@@ -442,7 +443,6 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(self.stack)
 
-        self._last_move = None
         self.reconnect_attempt = 0
         self.last_active_widget = self.login_widget
 
@@ -479,9 +479,9 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.room_list_widget)
     
     def send_move(self, direction):
-        # if direction != self._last_move:
-        self.network.send(f"MOVE {direction}")
-            # self._last_move = direction
+        if direction != self.game_state.last_move:
+            self.network.send(f"MOVE {direction}")
+            self._last_move = direction
 
     def disconnect_from_server(self):
         self.network.should_reconnect = False
@@ -577,6 +577,7 @@ class MainWindow(QMainWindow):
 
         elif cmd == "TICK":
             self.game_state.last_game_result = ""
+            self.game_state.last_move = None
             self.game_state.waiting_for = [] # Clear waiting status on new tick
             self.parse_game_state(tokens[1:])
             if self.stack.currentWidget() != self.game_widget:
