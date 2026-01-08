@@ -463,7 +463,8 @@ void Server::handle_socket_read(int sock_fd) {
   if (conn.buff.size() < 4)
     return;
   if (get_msg_type(conn.buff.substr(0, 4)) == INVALID) {
-    close_connection(conn.socket);
+    this->close_connection(conn.socket);
+    return;
   }
 
   size_t separator = conn.buff.find('|');
@@ -637,9 +638,9 @@ int Server::process_message(Connection &conn, std::string msg) {
     broadcast_game(rooms[room_id], reply);
   } break;
   case INVALID: {
-    std::cout << "invalid message: [" << msg << "] from " << conn.get_name()
-              << std::endl;
-    // return 1;
+    // std::cout << "invalid message: [" << msg << "] from " << conn.get_name()
+    //           << std::endl;
+    return 1;
   } break;
   case LEAVE: {
     if (tokens.size() != 1)
