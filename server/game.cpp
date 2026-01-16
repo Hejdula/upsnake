@@ -1,13 +1,13 @@
 #include "game.hpp"
-#include <iostream>
 #include <algorithm>
+#include <iostream>
 #include <vector>
 
 Game::Game() : active(false) {
   grid.fill({});
   dir_to_pos = {
-      Position{0, -1},  // UP
-      Position{0, 1}, // DOWN
+      Position{0, -1}, // UP
+      Position{0, 1},  // DOWN
       Position{-1, 0}, // LEFT
       Position{1, 0},  // RIGHT
   };
