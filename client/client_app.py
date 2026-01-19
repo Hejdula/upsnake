@@ -22,6 +22,18 @@ DIRECTION_MAP = {
 }
 
 class GameState:
+    """
+    @brief Holds the overall client-side game state (nick, apple, players, grid).
+    This class is shared between the UI widgets.
+
+    @var last_move The last direction successfully sent to the server.
+    @var apple Tuple (x, y) representing apple coordinates.
+    @var players Dictionary mapping nicknames to player data (body segments, alive status).
+    @var my_nick The nickname of the local player.
+    @var grid_size Size of the game grid (assumed square).
+    @var waiting_for List of nicknames the server is waiting for (lag compensation).
+    @var last_game_result String describing the result of the last match (Win/Draw).
+    """
     def __init__(self):
         self.last_move = ""
         self.apple = (0, 0)
@@ -32,6 +44,20 @@ class GameState:
         self.last_game_result = ""
 
 class NetworkWorker(QObject):
+    """
+    @brief Worker for handling TCP connection in a separate thread.
+    Manages socket creation, reading, writing, and timeout detection.
+    Emits Qt signals to communicate with the main UI thread.
+    
+    @signal msg_received(str) Emitted when a complete protocol message is received.
+    @signal disconnected Emitted when the connection is cleanly closed.
+    @signal reconnect Emitted when connection is lost and reconnection should be attempted.
+    @signal error_occurred(str) Emitted when a socket error occurs.
+    @signal connection_unstable Emitted when no data is received for SERVER_TIMEOUT_SEC.
+    @signal connection_recovered Emitted when data is received after instability.
+    @signal connected Emitted when TCP connection is successfully established.
+    @signal connection_failed(str) Emitted when initial connection fails.
+    """
     msg_received = pyqtSignal(str)
     disconnected = pyqtSignal()
     reconnect = pyqtSignal()
@@ -52,6 +78,11 @@ class NetworkWorker(QObject):
         self.timeout_timer.start(1000)
 
     def connect_to_server(self, ip, port):
+        """
+        @brief Initiates the connection process in a new thread.
+        @param ip Server IP address.
+        @param port Server port.
+        """
         threading.Thread(target=self._connect_task, args=(ip, port), daemon=True).start()
 
     def _connect_task(self, ip, port):
@@ -75,6 +106,10 @@ class NetworkWorker(QObject):
                 self.connection_unstable.emit()
 
     def send(self, msg):
+        """
+        @brief Sends a message to the server.
+        @param msg Message content (without delimiter).
+        """
         if self.socket:
             try:
                 self.socket.sendall((msg + "|").encode())
@@ -98,6 +133,9 @@ class NetworkWorker(QObject):
             self.disconnected.emit()
 
     def receive_loop(self):
+        """
+        @brief Main loop for receiving data from socket.
+        """
         buffer = ""
         while self.socket and self.running:
             try:
@@ -167,6 +205,13 @@ class ReconnectWidget(QWidget):
         self.status_label.setText(f"Connection lost.\nReconnecting... ({attempt}/{max_attempts})")
 
 class LoginWidget(QWidget):
+    """
+    @brief Widget for user login.
+    Provides fields for nickname, IP, and port. Performs simple validation
+    before emitting logic request.
+    
+    @signal login_request(str, str, int) Emitted with nick, ip, port when user clicks Connect.
+    """
     login_request = pyqtSignal(str, str, int) # nick, ip, port
 
     def __init__(self):
@@ -195,6 +240,9 @@ class LoginWidget(QWidget):
         self.setLayout(layout)
 
     def on_connect(self):
+        """
+        @brief Validates input and emits login request.
+        """
         nick = self.nick_input.text()
         ip = self.ip_input.text()
 
@@ -234,6 +282,14 @@ class LoginWidget(QWidget):
             self.connect_btn.setText("Connect")
 
 class RoomListWidget(QWidget):
+    """
+    @brief Widget for displaying and selecting game rooms.
+    Shows the list of active rooms from the server and allows joining or disconnecting.
+
+    @signal join_room(int) Emitted with room index when user clicks Join.
+    @signal refresh_request Emitted when user clicks Refresh.
+    @signal quit Emitted when user clicks Disconnect.
+    """
     join_room = pyqtSignal(int)
     refresh_request = pyqtSignal()
     quit = pyqtSignal()
@@ -261,6 +317,10 @@ class RoomListWidget(QWidget):
         self.setLayout(layout)
 
     def update_rooms(self, sizes):
+        """
+        @brief Updates the list of available rooms.
+        @param sizes List of player counts in rooms.
+        """
         self.list_widget.clear()
         for i, size in enumerate(sizes):
             self.list_widget.addItem(f"Room {i} - Players: {size}")
@@ -271,6 +331,14 @@ class RoomListWidget(QWidget):
             self.join_room.emit(row)
 
 class LobbyWidget(QWidget):
+    """
+    @brief Widget for the in-room lobby view.
+    Displays connected players in the current room and offers controls to start the game
+    or leave back to the room list.
+    
+    @signal start_game Emitted when user requests to start.
+    @signal leave_room Emitted when user wants to leave the room.
+    """
     start_game = pyqtSignal()
     leave_room = pyqtSignal()
 
@@ -295,6 +363,10 @@ class LobbyWidget(QWidget):
         self.setLayout(layout)
 
     def update_players(self, players):
+        """
+        @brief Updates the list of players in the lobby.
+        @param players List of player nicknames.
+        """
         self.players_list.clear()
         for p in players:
             item = QListWidgetItem(p)
@@ -303,12 +375,20 @@ class LobbyWidget(QWidget):
             self.players_list.addItem(item)
 
 class GameBoard(QWidget):
+    """
+    @brief Widget for rendering the actual game grid.
+    Uses QPainter to draw the grid, players (alive/dead), and the apple based on
+    the current GameState.
+    """
     def __init__(self, game_state):
         super().__init__()
         self.game_state = game_state
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def paintEvent(self, event):
+        """
+        @brief Renders the game grid, snakes, and objects.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
@@ -371,6 +451,13 @@ class GameBoard(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
 class GameWidget(QWidget):
+    """
+    @brief Compound widget containing the Lobby and GameBoard.
+    This is the main view once connected to a room. It handles keyboard events
+    and forwards them as movement requests.
+    
+    @signal move_request(str) Emitted with direction (U, D, L, R) on arrow key press.
+    """
     move_request = pyqtSignal(str)
     leave_game = pyqtSignal()
 
@@ -399,6 +486,12 @@ class GameWidget(QWidget):
             self.move_request.emit('R')
 
 class MainWindow(QMainWindow):
+    """
+    @brief Main application window managing all widgets.
+    Acts as the controller, wiring signals between the NetworkWorker and the UI widgets.
+    Manages the QStackedWidget to transition between Login, RoomList, Game view and reconnect widgets.
+    Dispatches incoming network messages to appropriate handlers.
+    """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Snake")
@@ -414,9 +507,7 @@ class MainWindow(QMainWindow):
         self.network.connected.connect(self.on_connected)
         self.network.connection_failed.connect(self.on_connection_failed)
         
-        self.game_state = GameState()
-        
-        self.stack = QStackedWidget()
+        self.game_state = GameState() 
         
         self.login_widget = LoginWidget()
         self.login_widget.login_request.connect(self.connect_to_server)
@@ -435,6 +526,7 @@ class MainWindow(QMainWindow):
         self.reconnect_widget = ReconnectWidget()
         self.reconnect_widget.cancel_reconnect.connect(self.cancel_reconnect)
         
+        self.stack = QStackedWidget()
         self.stack.addWidget(self.login_widget)
         self.stack.addWidget(self.room_list_widget)
         self.stack.addWidget(self.game_widget)
@@ -532,6 +624,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", msg)
 
     def handle_message(self, msg):
+        """
+        @brief Processes incoming protocol messages.
+        @param msg The raw message string.
+        """
         if self.stack.currentWidget() == self.internet_issues_widget:
              self.stack.setCurrentWidget(self.last_active_widget)
 
@@ -604,6 +700,10 @@ class MainWindow(QMainWindow):
             self.disconnect_from_server()
 
     def parse_game_state(self, tokens):
+        """
+        @brief Parses the TICK message tokens and updates game state.
+        @param tokens List of strings from the TICK message.
+        """
         try:
             # Format: apple_x apple_y ...
             if len(tokens) < 2: return

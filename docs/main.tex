@@ -1,0 +1,370 @@
+\documentclass[english, kiv, sem, he, iso690alph, pdf, viewonly]{fasthesis}
+\title{Multiplayer Snake Game}
+\author{Jan}{Hejdušek}
+\supervisor{}
+% \assignment{sw2025-02.pdf}
+
+\usepackage{csquotes}
+\usepackage{pdfpages}
+\usepackage{listings}
+\usepackage{syntax}
+
+\nobastardtitle
+\nocopyrightnotice
+
+\newif\iffullbuild
+\fullbuildtrue
+
+\lstset{style=FASThesisLstStyle, numberblanklines=false, tabsize=4,
+keywordstyle=\color{blue}}
+
+\begin{document}
+\iffullbuild
+\frontpages[notm]
+\tableofcontents
+\fi
+
+\chapter{Introduction}
+\section{Overview}
+This document is a documentation to a seminar work for the course
+\lstinline|KIV/UPS|. It describes the implementation of a multiplayer
+snake game.
+The application operates on a client--server architecture, where a
+central server manages the game state, rooms, and synchronization,
+while clients provide a graphical interface for players.
+The goal of this project is to demonstrate the understanding of
+network programming and ability to create robust custom application
+protocols.
+\\\\
+The document covers the following topics:
+
+\begin{itemize}
+  \item High--level architecture and technology stack.
+  \item Detailed description of the communication protocol.
+  \item Internal implementation details of both server and client.
+  \item Short user guide for compilation and running the programs.
+\end{itemize}
+
+\section{Game Rules}
+The game follows the classic Snake mechanics adapted for a
+multiplayer environment.
+Players control snakes on a shared grid, aiming to survive the longest.
+
+Starting positions of the snakes and the apple are randomized.
+All Snakes move at the same time in one of four directions. Eating
+the apple increases the snake's length.
+A player is eliminated upon collision with a wall, another snake, or themselves.
+The last surviving player wins the round. If all remaining players
+collide simultaneously, the game ends in a draw.
+
+\chapter{Implementation}
+
+The project is split into two distinct parts: a C++ server and a
+Python client. They communicate over TCP/IP using a custom text--based
+protocol. Both the client and the server closes the connection if the
+protocol is violated or if the other side is inactive for too long.
+
+\section{Server Architecture}
+
+\subsection{Modularization}
+The server codebase is organized into following files/classes:
+\begin{itemize}
+  \item \texttt{Server}: The core class that manages the life--cycle
+    of the application, networking setup, and the main event loop. It
+    acts as the central controller handling I/O events.
+  \item \texttt{Game}: Encapsulates the logic for a single game room.
+    It maintains the game state (grid, snake positions, apple) and
+    processes game rules independently of the networking layer.
+  \item \texttt{Connection}: Wraps a client's file descriptor and
+    associated buffers, linking the socket to a
+    \texttt{Player} instance.
+  \item \texttt{Player}: Represents a user in the game, storing
+    attributes like nickname, current direction, and the snake's body segments.
+\end{itemize}
+
+\subsection{Event Loop and Epoll}
+To handle incoming connections and concurrent events the server uses
+the Linux \texttt{epoll} API. The main
+server loop waits for events on a single file descriptor set, which includes:
+\begin{itemize}
+  \item The listening socket (for new connections).
+  \item Connected client sockets (for incoming messages).
+  \item \texttt{timerfd} file descriptors (for game ticks, ping and timeouts).
+\end{itemize}
+This pooling allows the server to handle multiple game rooms
+and clients within a single thread.
+
+\subsection{Game Management}
+The server manages multiple \lstinline|Game| instances (rooms). Each room
+handles it own game state. The state is updated on timer events using
+\lstinline|timerfd| file descriptor.
+
+To ensure fairness and synchronization over
+the network, the game tick processing is done purely on server.
+Before advancing the game state, the server waits for clients to
+confirm they recieved data about last game tick (up to a timeout),
+also notifying other players for whom are they waiting.
+
+\section{Client Architecture}
+The client is implemented in Python using the \textbf{PyQt6} framework.
+It relies on the Qt signal mechanism to synchronize state
+between the networking logic and the user interface.
+
+\subsection{NetworkWorker}
+The \texttt{NetworkWorker} class runs in a background thread to
+prevent blocking the main GUI event loop.
+It manages the blocking TCP socket operations.
+
+Incoming raw data is buffered and split by the pipe character
+\lstinline+|+. Complete, valid messages (the first four characters
+are checked if they match the protocol) are sent to the main thread with the
+\texttt{msg\_received(msg)} signal.
+
+The network thread also manages connection state, among other signals
+emitting signal
+\\ \lstinline|connection_unstable| to notify user about network
+issues and signal \texttt{reconnect} to begin trying to reconnect to
+the server. When reconnecting, the network thread is terminated and
+reinitialized on connection attempts by the main thread.
+
+\subsection{User Interface Structure}
+The application uses a \texttt{QStackedWidget} to manage view transitions.
+The primary widgets include:
+\begin{itemize}
+  \item \textbf{LoginWidget}: The entry screen for inputting nickname
+    and server details.
+  \item \textbf{RoomListWidget}: Displays the list of available rooms
+    and allows the user to join one.
+  \item \textbf{GameWidget}: The main container for the active
+    session. It is composed of:
+    \begin{itemize}
+      \item \textbf{LobbyWidget}: Displays the player list within
+        the room and buttons to start or leave the game.
+      \item \textbf{GameBoard}: A custom widget that handles the
+        rendering of snakes, apples, and grid lines using
+        \texttt{QPainter}. Capable of handling keyboard events for movement.
+    \end{itemize}
+  \item \textbf{ReconnectWidget}: An overlay displayed during
+    connection loss to offer manual cancellation and status updates.
+\end{itemize}
+
+\subsection{Application Flow}
+The user experience follows a state-machine-like flow:
+\begin{enumerate}
+  \item \textbf{Connection}: The user initiates a connection from the
+    Login screen.
+  \item \textbf{Room Selection}: Upon handshake and setting a nick,
+    the user browses available rooms.
+  \item \textbf{Lobby}: Joining a room transitions to the Game view,
+    initially in a "Gmae lobby" state where players wait for others.
+  \item \textbf{Gameplay}: Once the game starts, the
+    \texttt{GameBoard} receives focus. The state is updated purely
+    via server \texttt{TICK} messages.
+  \item \textbf{Game end}: After a match ends (Win/Draw), players
+    remain in the room and can start a new game.
+\end{enumerate}
+
+\chapter{Communication Protocol}
+The communication uses a custom text-based protocol over TCP.
+All messages start with a 4 characters determining type of the
+message. Whole messages are delimited by a pipe character
+'\texttt{|}' and message fields are separated with a white space character.
+
+\section{Client Requests}
+Messages sent from the Client to the Server.
+
+\begin{description}
+  \item\texttt{NICK <nickname>} \\
+    Registers the client on the server. 
+    Based on the answer from server, the client infers its state. Server responds
+    with \texttt{ROOM} or \texttt{LOBY} message, additionally
+    \texttt{TICK} message if the game in the room is active.
+
+  \item\texttt{LIST} \\
+    Request a list of available rooms. Server responds with a \texttt{ROOM} message
+    containing sizes of all rooms.
+
+  \item\texttt{JOIN <room\_id>} \\
+    Request to join a specific room. Server responds with a \texttt{LOBY} message
+    listing players in the room if successful, or \texttt{FULL} if the room is full.
+
+  \item\texttt{LEAV} \\
+    Leave the current room. Server confirms with a \texttt{LEFT} message.
+
+  \item\texttt{MOVE <direction>} \\
+    Sends inputs (\texttt{U}, \texttt{D}, \texttt{L}, \texttt{R}). Server
+    acknowledges with a \texttt{MOVD} message.
+
+  \item\texttt{STRT} \\
+    Request to start the game. Server responds with \texttt{STRT OK} on success
+    or \texttt{STRT FAIL} on failure.
+
+  \item\texttt{QUIT} \\
+    Gracefully disconnects.
+\end{description}
+
+\section{Server Notifications}
+Messages sent from the Server to client.
+
+\begin{description}
+  \item\texttt{TICK <ax> <ay> [<nick> <hx> <hy> <status><body>] ...} \\
+    Game state update. In active game, each game tick server sends game state to all players in room. 
+    Client must acknowledge with \texttt{TACK}, if server does not recieve the acknowledge from all players before next game tick, it notifies all other players and waits.
+
+  \item\texttt{PING} \\
+    Connection liveliness check. Client replies with \texttt{PONG}.
+
+  \item\texttt{WAIT <nick> ...} \\
+    Server waiting for lagging players. Client acknowledges with \texttt{ZZZZ}.
+
+  \item\texttt{WINS <nick>} \\
+    Game ended, with winning player nick. Client acknowledges the end of game with \texttt{SSSS}.
+
+  \item\texttt{DRAW} \\
+    Game ended in a draw. Client acknowledges the end of game with \texttt{SSSS}.
+\end{description}
+
+\section{Game State Encoding}
+The \texttt{TICK} message carries the full compressed game state:
+\begin{lstlisting}
+TICK <ax> <ay> [<nick> <hx> <hy> <status><body>] ...
+\end{lstlisting}
+Where:
+\begin{itemize}
+  \item \texttt{ax, ay}: Apple coordinates.
+  \item \texttt{nick}: Player nickname.
+  \item \texttt{hx, hy}: Snake head coordinates.
+  \item \texttt{status}: \texttt{H} (Alive) or \texttt{E} (Eliminated).
+  \item \texttt{body}: String of directions (U, D, L, R) representing
+    body segments.
+\end{itemize}
+
+\section{Formal Grammar (BNF)}
+Formal definition of the protocol using Backus-Naur Form
+(BNF) notation.
+
+\setlength{\grammarparsep}{5pt plus 1pt minus 1pt}
+\setlength{\grammarindent}{12em}
+
+\begin{grammar}
+  <message>       ::= <content> `|'
+
+  <content>       ::= <client-msg>
+  \alt <server-msg>
+
+  <client-msg>    ::= `NICK' <sp> <nick>
+  \alt `LIST'
+  \alt `JOIN' <sp> <int>
+  \alt `LEAV'
+  \alt `MOVE' <sp> <dir>
+  \alt `STRT'
+  \alt `QUIT'
+  \alt `TACK'
+  \alt `PONG'
+  \alt `ZZZZ'
+  \alt `SSSS'
+
+  <server-msg>    ::= `ROOM' \{ <sp> <int> \}
+  \alt `LOBY' \{ <sp> <nick> \}
+  \alt `WAIT' \{ <sp> <nick> \}
+  \alt `PING'
+  \alt `WINS' <sp> <nick>
+  \alt `DRAW'
+  \alt `TICK' <sp> <int> <sp> <int> \{ <p-state> \}
+  \alt `FULL'
+  \alt `LEFT'
+  \alt `MOVD'
+  \alt `STRT' <sp> (`OK' | `FAIL')
+
+  <p-state>       ::= <sp> <nick> <sp> <int> <sp> <int> <sp> <stat> <dirs>
+
+  <stat>          ::= `H' | `E'
+
+  <dirs>          ::= \{ <dir> \}
+
+  <dir>           ::= `U' | `D' | `L' | `R'
+
+  <sp>            ::= ` '
+\end{grammar}
+
+\section{Reconnection Handling}
+The imlementation with the protocol support session recovery for clients that experience
+temporary network issues.
+
+The server maintains information about players who unexpectedly
+disconnect for a period of time. During this window, the
+\texttt{Player} object and its state are preserved in memory.
+
+If a client connects and sends a \texttt{NICK} that matches a
+preserved or an existing player:
+\begin{enumerate}
+  \item The old socket connection (if some) is forced closed.
+  \item The existing \texttt{Player} instance is bound to the new connection.
+  \item The current context state (\texttt{ROOM} list, \texttt{LOBY}
+    content or current game \texttt{TICK})
+    is sent to the reconnected client.
+\end{enumerate}
+This allows a user to restart their client or recover from a
+connection drop and immediately
+resume their position in a running game or lobby.
+
+The client checks how much time passed since the last message from server. 
+If greater than given timeout, it closes the connection and tries to open a new one multiple times with the server. 
+
+\chapter{User guide}
+\section{Compilation/installation}
+
+\subsection{Server}
+The server is written in C++17 and requires a GCC compiler.
+\begin{console}{Build the server}
+  `\uxprompt`cd server
+  `\uxprompt`make
+\end{console}
+
+\subsection{Client}
+The client requires Python3 interpret and PyQt6 library.
+\begin{console}{Install dependencies}
+  `\uxprompt`cd client
+  `\uxprompt`pip install -r requirements.txt
+\end{console}
+
+\section{Usage}
+
+\subsection{Running the Server}
+Start the server providing port and IP address (optional).
+\begin{console}{Start Server}
+  `\uxprompt`./server/server 8888 127.0.0.1
+  Listening on: 127.0.0.1:8888
+\end{console}
+
+\subsection{Running the Client}
+Start the client application:
+\begin{console}{Run Client}
+  `\uxprompt`python client/client_app.py
+\end{console}
+A GUI window will appear. Enter a nickname, the server address and
+port to connect.
+
+\chapter{Conclusion}
+The project fulfills all requirements specified by the assignment.
+
+I am satisfied with the implementation of concurrency on both the
+server and the client.
+On the server, using \texttt{epoll} and timer file descriptors
+simplified the design significantly.
+This event--driven approach removed the need for complex threading,
+as the server only wakes up for messages or events.
+On the client, the separate networking thread worked well with PyQt signals.
+
+With the current implementation on the server, it would not scale
+well with increasing number of players as many lookups are
+brute--force as optimization was not a concern.
+
+The protocol works reliably, but its design is not optimal.
+Using a text delimiter to separate messages and spaces for fields is
+inefficient.
+A length prefix format would be more robust for determining message
+boundaries and finding out invalid or corrupted messages before
+reaching the delimiter.
+
+\end{document}
